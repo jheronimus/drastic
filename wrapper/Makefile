@@ -1,19 +1,39 @@
 CC ?= gcc
-CFLAGS ?= -O2 -fPIC -Wall -Wextra
-INCLUDES = -I.
-SRCS = bionic_shim.c jni_mock.c drastic_libretro.c
-OBJS = $(SRCS:.c=.o)
-TARGET = drastic_libretro.so
+CFLAGS ?= -O2 -fPIC -Wall -Wextra -I.
+LDFLAGS ?= -shared
 
-all: $(TARGET)
+OBJS = bionic_shim.o jni_mock.o drastic_libretro.o
+TARGET_SO = drastic_libretro.so
+LIBLOG = liblog.so
+LIBOPENSLES = libOpenSLES.so
+PAK_DIR = dist/NDS.pak
 
-$(TARGET): $(OBJS)
-	$(CC) -shared $(OBJS) -o $@ $(LDFLAGS) -ldl
+.PHONY: all clean pak
+
+all: $(TARGET_SO) pak
+
+$(LIBLOG): bionic_shim.o
+	$(CC) $(LDFLAGS) bionic_shim.o -o $@
+
+$(LIBOPENSLES): bionic_shim.o
+	$(CC) $(LDFLAGS) bionic_shim.o -o $@
 
 %.o: %.c
-	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(TARGET_SO): $(OBJS) $(LIBLOG) $(LIBOPENSLES)
+	$(CC) $(LDFLAGS) $(OBJS) -o $@ -L. -llog -lOpenSLES -ldl
+
+pak: $(TARGET_SO) $(LIBLOG) $(LIBOPENSLES)
+	mkdir -p $(PAK_DIR)
+	cp $(TARGET_SO) $(LIBLOG) $(LIBOPENSLES) launch.sh default.cfg $(PAK_DIR)/
+	@if [ -d "../core/android/assets" ]; then \
+		cp -r ../core/android/assets/* $(PAK_DIR)/ 2>/dev/null || true; \
+	fi
+	@chmod +x $(PAK_DIR)/launch.sh
+	cd dist && zip -r -q NDS.pak.zip NDS.pak
+	@echo "[DraStic] NDS.pak created in $(PAK_DIR)/ and dist/NDS.pak.zip"
 
 clean:
-	rm -f $(OBJS) $(TARGET)
-
-.PHONY: all clean
+	rm -f $(OBJS) $(TARGET_SO) $(LIBLOG) $(LIBOPENSLES)
+	rm -rf dist/

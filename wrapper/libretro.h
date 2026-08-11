@@ -14,7 +14,7 @@ extern "C" {
 
 #define RETRO_DEVICE_TYPE_SHIFT 8
 #define RETRO_DEVICE_MASK ((1 << RETRO_DEVICE_TYPE_SHIFT) - 1)
-#define RETRO_DEVICE_SUBCLASS(base, id) (((id + 1) << RETRO_DEVICE_TYPE_SHIFT) | base)
+#define RETRO_DEVICE_BUILD_ID(base, id) (((base) << RETRO_DEVICE_TYPE_SHIFT) | (id))
 
 #define RETRO_DEVICE_NONE         0
 #define RETRO_DEVICE_JOYPAD       1
@@ -43,13 +43,8 @@ extern "C" {
 
 #define RETRO_DEVICE_INDEX_ANALOG_LEFT   0
 #define RETRO_DEVICE_INDEX_ANALOG_RIGHT  1
-
 #define RETRO_DEVICE_ID_ANALOG_X         0
 #define RETRO_DEVICE_ID_ANALOG_Y         1
-
-#define RETRO_DEVICE_ID_POINTER_X        0
-#define RETRO_DEVICE_ID_POINTER_Y        1
-#define RETRO_DEVICE_ID_POINTER_PRESSED  2
 
 #define RETRO_REGION_NTSC  0
 #define RETRO_REGION_PAL   1
@@ -57,44 +52,41 @@ extern "C" {
 #define RETRO_MEMORY_SAVE_RAM    0
 #define RETRO_MEMORY_RTC         1
 #define RETRO_MEMORY_SYSTEM_RAM  2
+#define RETRO_MEMORY_VIDEO_RAM   3
 
-#define RETRO_ENVIRONMENT_SET_ROTATION                   1
-#define RETRO_ENVIRONMENT_GET_OVERSCAN                   2
-#define RETRO_ENVIRONMENT_GET_CAN_DUPLICATE              3
-#define RETRO_ENVIRONMENT_SET_MESSAGE                    6
-#define RETRO_ENVIRONMENT_SHUTDOWN                       7
-#define RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL          8
-#define RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY           9
-#define RETRO_ENVIRONMENT_SET_PIXEL_FORMAT              10
-#define RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS         11
-#define RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK         12
-#define RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE    13
-#define RETRO_ENVIRONMENT_SET_HW_RENDER                 14
-#define RETRO_ENVIRONMENT_GET_VARIABLE                  15
-#define RETRO_ENVIRONMENT_SET_VARIABLES                 16
-#define RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE           17
-#define RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME           18
-#define RETRO_ENVIRONMENT_GET_LIBRETRO_PATH             19
-#define RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK            22
-#define RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK       21
-#define RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE          23
-#define RETRO_ENVIRONMENT_GET_INPUT_DEVICE_CAPABILITIES 24
-#define RETRO_ENVIRONMENT_GET_LOG_INTERFACE             27
-#define RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY            31
+#define RETRO_ENVIRONMENT_SET_ROTATION  1
+#define RETRO_ENVIRONMENT_GET_OVERSCAN  2
+#define RETRO_ENVIRONMENT_GET_CAN_DUPLICATE 3
+#define RETRO_ENVIRONMENT_SET_MESSAGE   6
+#define RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL 8
+#define RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY 9
+#define RETRO_ENVIRONMENT_SET_PIXEL_FORMAT 10
+#define RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS 11
+#define RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK 12
+#define RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE 13
+#define RETRO_ENVIRONMENT_GET_VARIABLE 15
+#define RETRO_ENVIRONMENT_SET_VARIABLES 16
+#define RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE 17
+#define RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME 18
+#define RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY 27
+#define RETRO_ENVIRONMENT_SET_CORE_OPTIONS 52
 
-enum retro_pixel_format {
+enum retro_pixel_format
+{
    RETRO_PIXEL_FORMAT_0RGB1555 = 0,
    RETRO_PIXEL_FORMAT_XRGB8888 = 1,
    RETRO_PIXEL_FORMAT_RGB565   = 2,
    RETRO_PIXEL_FORMAT_UNKNOWN  = INT_MAX
 };
 
-struct retro_message {
+struct retro_message
+{
    const char *msg;
    unsigned frames;
 };
 
-struct retro_input_descriptor {
+struct retro_input_descriptor
+{
    unsigned port;
    unsigned device;
    unsigned index;
@@ -102,48 +94,66 @@ struct retro_input_descriptor {
    const char *description;
 };
 
-struct retro_system_info {
-   const char *library_name;
-   const char *library_version;
-   const char *valid_extensions;
-   bool need_fullpath;
-   bool block_extract;
+struct retro_variable
+{
+   const char *key;
+   const char *value;
 };
 
-struct retro_game_geometry {
+struct retro_core_option_definition
+{
+   const char *key;
+   const char *desc;
+   const char *info;
+   struct {
+      const char *value;
+      const char *label;
+   } values[16];
+   const char *default_value;
+};
+
+struct retro_game_geometry
+{
    unsigned base_width;
    unsigned base_height;
    unsigned max_width;
    unsigned max_height;
-   float aspect_ratio;
+   float    aspect_ratio;
 };
 
-struct retro_system_timing {
+struct retro_system_timing
+{
    double fps;
    double sample_rate;
 };
 
-struct retro_system_av_info {
+struct retro_system_av_info
+{
    struct retro_game_geometry geometry;
    struct retro_system_timing timing;
 };
 
-struct retro_game_info {
-   const char *path;
-   const void *data;
-   size_t size;
-   const char *meta;
+struct retro_system_info
+{
+   const char *library_name;
+   const char *library_version;
+   const char *valid_extensions;
+   bool        need_fullpath;
+   bool        block_extract;
 };
 
-struct retro_variable {
-   const char *key;
-   const char *value;
+struct retro_game_info
+{
+   const char *path;
+   const void *data;
+   size_t      size;
+   const char *meta;
 };
 
 typedef bool (*retro_environment_t)(unsigned cmd, void *data);
 typedef void (*retro_video_refresh_t)(const void *data, unsigned width, unsigned height, size_t pitch);
 typedef void (*retro_audio_sample_t)(int16_t left, int16_t right);
-typedef size_t (*retro_audio_sample_batch_t)(const int16_t *data, size_t frames);
+typedef void (*retro_audio_sample_batch_t)(const int16_t *data, size_t frames);
 typedef void (*retro_input_poll_t)(void);
 typedef int16_t (*retro_input_state_t)(unsigned port, unsigned device, unsigned index, unsigned id);
 
@@ -156,21 +166,31 @@ void retro_set_input_state(retro_input_state_t);
 
 void retro_init(void);
 void retro_deinit(void);
+
 unsigned retro_api_version(void);
+
 void retro_get_system_info(struct retro_system_info *info);
-void retro_get_system_av_info(struct retro_system_av_info *av);
+void retro_get_system_av_info(struct retro_system_av_info *info);
+
 void retro_set_controller_port_device(unsigned port, unsigned device);
+
 void retro_reset(void);
 void retro_run(void);
+
 size_t retro_serialize_size(void);
 bool retro_serialize(void *data, size_t size);
 bool retro_unserialize(const void *data, size_t size);
+
 void retro_cheat_reset(void);
 void retro_cheat_set(unsigned index, bool enabled, const char *code);
+
 bool retro_load_game(const struct retro_game_info *game);
 bool retro_load_game_special(unsigned game_type, const struct retro_game_info *info, size_t num_info);
+
 void retro_unload_game(void);
+
 unsigned retro_get_region(void);
+
 void *retro_get_memory_data(unsigned id);
 size_t retro_get_memory_size(unsigned id);
 
@@ -178,4 +198,4 @@ size_t retro_get_memory_size(unsigned id);
 }
 #endif
 
-#endif /* LIBRETRO_H */
+#endif

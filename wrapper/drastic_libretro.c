@@ -1,15 +1,13 @@
-#include "libretro.h"
-#include "jni_mock.h"
+#include "drastic_libretro.h"
 #include "bionic_shim.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
-#include <stdbool.h>
 
 #define DRASTIC_LIB_NAME "libdrastic_arm64.so"
 
-/* DraStic NDS Input Key Mask Defines */
+/* DS Keymap constants */
 #define NDS_KEY_A      (1 << 0)
 #define NDS_KEY_B      (1 << 1)
 #define NDS_KEY_SELECT (1 << 2)
@@ -23,28 +21,25 @@
 #define NDS_KEY_X      (1 << 10)
 #define NDS_KEY_Y      (1 << 11)
 
-/* Display Layout Modes */
-#define LAYOUT_VERTICAL   0
-#define LAYOUT_SINGLE     1
-#define LAYOUT_HORIZONTAL 2
+/* Screen Layout Modes */
+enum layout_mode {
+   LAYOUT_VERTICAL = 0,
+   LAYOUT_SINGLE,
+   LAYOUT_HORIZONTAL
+};
 
-/* Touch Pointer Modes */
-#define TOUCH_MODE_NONE    0
-#define TOUCH_MODE_ANALOG  1
-#define TOUCH_MODE_DPAD    2
+enum touch_mode {
+   TOUCH_MODE_ANALOG = 0,
+   TOUCH_MODE_TOUCHSCREEN
+};
 
-/* Function Pointers for DraStic JNI Interface */
-typedef jint (*fn_JNI_OnLoad)(JavaVM *vm, void *reserved);
-typedef jboolean (*fn_onInit)(JNIEnv *env, jclass clazz, jstring path, jstring savePath);
-typedef jboolean (*fn_startGame)(JNIEnv *env, jclass clazz, jstring romPath);
-typedef void (*fn_updateFrame)(JNIEnv *env, jclass clazz);
-typedef void (*fn_renderFrame)(JNIEnv *env, jclass clazz, jshortArray buffer);
-typedef void (*fn_updateInput)(JNIEnv *env, jclass clazz, jint keys, jint touchX, jint touchY, jboolean touched);
-typedef jboolean (*fn_saveState)(JNIEnv *env, jclass clazz, jstring statePath);
-typedef jboolean (*fn_loadState)(JNIEnv *env, jclass clazz, jstring statePath);
-typedef void (*fn_resetDS)(JNIEnv *env, jclass clazz);
-typedef void (*fn_quitSystem)(JNIEnv *env, jclass clazz);
+static retro_environment_t environ_cb;
+static retro_video_refresh_t video_cb;
+static retro_audio_sample_batch_t audio_batch_cb;
+static retro_input_poll_t input_poll_cb;
+static retro_input_state_t input_state_cb;
 
+static void *g_drastic_handle = NULL;
 static fn_JNI_OnLoad p_JNI_OnLoad = NULL;
 static fn_onInit p_onInit = NULL;
 static fn_startGame p_startGame = NULL;
@@ -56,48 +51,37 @@ static fn_loadState p_loadState = NULL;
 static fn_resetDS p_resetDS = NULL;
 static fn_quitSystem p_quitSystem = NULL;
 
-static void *g_drastic_handle = NULL;
 static bool g_initialized = false;
 static bool g_game_loaded = false;
 
-/* Libretro Callbacks */
-static retro_environment_t environ_cb;
-static retro_video_refresh_t video_cb;
-static retro_audio_sample_t audio_cb;
-static retro_audio_sample_batch_t audio_batch_cb;
-static retro_input_poll_t input_poll_cb;
-static retro_input_state_t input_state_cb;
+static uint16_t g_raw_screen_buffer[256 * 384];
+static uint16_t g_output_buffer[512 * 384];
+static jbyteArray g_jni_screen_array = NULL;
 
-/* Video & State Buffers */
-static uint16_t g_raw_screen_buffer[256 * 384]; /* Top + Bottom raw screen */
-static uint16_t g_output_buffer[512 * 384];     /* Output framebuffer */
-static jshortArray g_jni_screen_array = NULL;
+static enum layout_mode g_layout_mode = LAYOUT_VERTICAL;
+static enum touch_mode g_touch_mode = TOUCH_MODE_TOUCHSCREEN;
+static bool g_active_screen = false; /* false = top, true = bottom */
 
-/* Options & Settings */
-static int g_layout_mode = LAYOUT_VERTICAL;
-static int g_active_screen = 0; /* 0 = Top, 1 = Bottom */
-static int g_touch_mode = TOUCH_MODE_ANALOG;
-static bool g_dpad_pointer_active = false;
 static int g_cursor_x = 128;
 static int g_cursor_y = 96;
 
 /* System Paths */
-static char g_system_dir[512] = "./bios";
-static char g_save_dir[512] = "./saves";
+char g_system_dir[512] = "./bios";
+char g_save_dir[512] = "./saves";
 
 void retro_set_environment(retro_environment_t cb) {
    environ_cb = cb;
 
-   struct retro_variable vars[] = {
-      { "drastic_layout", "Screen Layout; Vertical|Single|Horizontal" },
-      { "drastic_touch_mode", "Touch Mode; Analog Stick|D-Pad Pointer|Direct Touch" },
+   static const struct retro_variable vars[] = {
+      { "drastic_screen_layout", "Screen Layout; Vertical (256x384)|Single Screen|Side by Side (512x192)" },
+      { "drastic_touch_mode", "Touch Mode; Physical Touchscreen|Analog Cursor" },
       { NULL, NULL }
    };
-   environ_cb(RETRO_ENVIRONMENT_SET_VARIABLES, vars);
+   environ_cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void*)vars);
 }
 
 void retro_set_video_refresh(retro_video_refresh_t cb) { video_cb = cb; }
-void retro_set_audio_sample(retro_audio_sample_t cb) { audio_cb = cb; }
+void retro_set_audio_sample(retro_audio_sample_t cb) { (void)cb; }
 void retro_set_audio_sample_batch(retro_audio_sample_batch_t cb) { audio_batch_cb = cb; }
 void retro_set_input_poll(retro_input_poll_t cb) { input_poll_cb = cb; }
 void retro_set_input_state(retro_input_state_t cb) { input_state_cb = cb; }
@@ -105,18 +89,22 @@ void retro_set_input_state(retro_input_state_t cb) { input_state_cb = cb; }
 static void update_variables(void) {
    struct retro_variable var = {0};
 
-   var.key = "drastic_layout";
+   var.key = "drastic_screen_layout";
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
-      if (strcmp(var.value, "Vertical") == 0) g_layout_mode = LAYOUT_VERTICAL;
-      else if (strcmp(var.value, "Single") == 0) g_layout_mode = LAYOUT_SINGLE;
-      else if (strcmp(var.value, "Horizontal") == 0) g_layout_mode = LAYOUT_HORIZONTAL;
+      if (strcmp(var.value, "Single Screen") == 0)
+         g_layout_mode = LAYOUT_SINGLE;
+      else if (strcmp(var.value, "Side by Side (512x192)") == 0)
+         g_layout_mode = LAYOUT_HORIZONTAL;
+      else
+         g_layout_mode = LAYOUT_VERTICAL;
    }
 
    var.key = "drastic_touch_mode";
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
-      if (strcmp(var.value, "Analog Stick") == 0) g_touch_mode = TOUCH_MODE_ANALOG;
-      else if (strcmp(var.value, "D-Pad Pointer") == 0) g_touch_mode = TOUCH_MODE_DPAD;
-      else if (strcmp(var.value, "Direct Touch") == 0) g_touch_mode = TOUCH_MODE_NONE;
+      if (strcmp(var.value, "Analog Cursor") == 0)
+         g_touch_mode = TOUCH_MODE_ANALOG;
+      else
+         g_touch_mode = TOUCH_MODE_TOUCHSCREEN;
    }
 }
 
@@ -127,11 +115,15 @@ void retro_init(void) {
    }
 
    const char *dir = NULL;
-   if (environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &dir) && dir) {
+   if (environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &dir) && dir && dir[0] == '/') {
       snprintf(g_system_dir, sizeof(g_system_dir), "%s", dir);
+   } else {
+      snprintf(g_system_dir, sizeof(g_system_dir), "/mnt/sdcard/Bios/NDS");
    }
-   if (environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &dir) && dir) {
+   if (environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &dir) && dir && dir[0] == '/') {
       snprintf(g_save_dir, sizeof(g_save_dir), "%s", dir);
+   } else {
+      snprintf(g_save_dir, sizeof(g_save_dir), "/mnt/sdcard/Saves/NDS");
    }
 
    struct retro_input_descriptor desc[] = {
@@ -160,6 +152,8 @@ void retro_init(void) {
       return;
    }
 
+   fprintf(stderr, "[DraStic-Trace] STEP 1: retro_init start\n");
+   fflush(stderr);
    p_JNI_OnLoad = (fn_JNI_OnLoad)dlsym(g_drastic_handle, "JNI_OnLoad");
    p_onInit = (fn_onInit)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_onInit");
    p_startGame = (fn_startGame)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_startGame");
@@ -172,18 +166,26 @@ void retro_init(void) {
    p_quitSystem = (fn_quitSystem)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_quitSystem");
 
    if (p_JNI_OnLoad) {
+      fprintf(stderr, "[DraStic-Trace] STEP 2: Calling JNI_OnLoad\n");
+      fflush(stderr);
       p_JNI_OnLoad(get_mock_java_vm(), NULL);
    }
 
    JNIEnv *env = get_mock_jni_env();
    if (p_onInit && env) {
+      fprintf(stderr, "[DraStic-Trace] STEP 3: Calling onInit sys_dir=%s save_dir=%s\n", g_system_dir, g_save_dir);
+      fflush(stderr);
       jstring path = (*env)->NewStringUTF(env, g_system_dir);
       jstring savePath = (*env)->NewStringUTF(env, g_save_dir);
       p_onInit(env, NULL, path, savePath);
    }
 
+   fprintf(stderr, "[DraStic-Trace] STEP 4: Creating screen array\n");
+   fflush(stderr);
    g_jni_screen_array = (*env)->NewByteArray(env, sizeof(g_raw_screen_buffer));
    g_initialized = true;
+   fprintf(stderr, "[DraStic-Trace] STEP 5: retro_init complete\n");
+   fflush(stderr);
 }
 
 void retro_deinit(void) {
@@ -234,11 +236,17 @@ void retro_reset(void) {
 bool retro_load_game(const struct retro_game_info *game) {
    if (!game || !game->path) return false;
    update_variables();
+   fprintf(stderr, "[DraStic-Trace] STEP 6: retro_load_game path=%s\n", game->path);
+   fflush(stderr);
 
    if (p_startGame) {
       JNIEnv *env = get_mock_jni_env();
       jstring rom = (*env)->NewStringUTF(env, game->path);
+      fprintf(stderr, "[DraStic-Trace] STEP 7: Calling startGame rom=%s\n", game->path);
+      fflush(stderr);
       g_game_loaded = p_startGame(env, NULL, rom);
+      fprintf(stderr, "[DraStic-Trace] STEP 8: startGame result=%d\n", g_game_loaded);
+      fflush(stderr);
       return g_game_loaded;
    }
    return false;
@@ -251,60 +259,64 @@ bool retro_load_game_special(unsigned type, const struct retro_game_info *info, 
    return false;
 }
 
-void retro_unload_game(void) { g_game_loaded = false; }
+void retro_unload_game(void) {
+   g_game_loaded = false;
+}
+
 unsigned retro_get_region(void) { return RETRO_REGION_NTSC; }
 void *retro_get_memory_data(unsigned id) { (void)id; return NULL; }
 size_t retro_get_memory_size(unsigned id) { (void)id; return 0; }
 
-void retro_cheat_reset(void) {}
-void retro_cheat_set(unsigned idx, bool enabled, const char *code) { (void)idx; (void)enabled; (void)code; }
-
 size_t retro_serialize_size(void) {
-   return 16 * 1024 * 1024; /* 16MB state buffer allocation */
+   return 10 * 1024 * 1024;
 }
 
 bool retro_serialize(void *data, size_t size) {
-   if (!data || size < retro_serialize_size()) return false;
-   if (p_saveState) {
-      JNIEnv *env = get_mock_jni_env();
-      jstring tmp = (*env)->NewStringUTF(env, "/tmp/drastic_savestate.tmp");
-      bool ret = p_saveState(env, NULL, tmp);
-      if (ret) {
-         FILE *f = fopen("/tmp/drastic_savestate.tmp", "rb");
-         if (f) {
-            fread(data, 1, size, f);
-            fclose(f);
-            remove("/tmp/drastic_savestate.tmp");
-            return true;
-         }
-      }
-   }
-   return false;
+   (void)data;
+   (void)size;
+   if (!g_game_loaded || !p_saveState) return false;
+   JNIEnv *env = get_mock_jni_env();
+   char state_path[512];
+   snprintf(state_path, sizeof(state_path), "%s/drastic_savestate.tmp", g_save_dir);
+   jstring path = (*env)->NewStringUTF(env, state_path);
+   return p_saveState(env, NULL, path);
 }
 
 bool retro_unserialize(const void *data, size_t size) {
-   if (!data || size == 0) return false;
-   if (p_loadState) {
-      FILE *f = fopen("/tmp/drastic_savestate.tmp", "wb");
-      if (f) {
-         fwrite(data, 1, size, f);
-         fclose(f);
-         JNIEnv *env = get_mock_jni_env();
-         jstring tmp = (*env)->NewStringUTF(env, "/tmp/drastic_savestate.tmp");
-         bool ret = p_loadState(env, NULL, tmp);
-         remove("/tmp/drastic_savestate.tmp");
-         return ret;
-      }
-   }
-   return false;
+   (void)data;
+   (void)size;
+   if (!g_game_loaded || !p_loadState) return false;
+   JNIEnv *env = get_mock_jni_env();
+   char state_path[512];
+   snprintf(state_path, sizeof(state_path), "%s/drastic_savestate.tmp", g_save_dir);
+   jstring path = (*env)->NewStringUTF(env, state_path);
+   return p_loadState(env, NULL, path);
+}
+
+void retro_cheat_reset(void) {}
+void retro_cheat_set(unsigned index, bool enabled, const char *code) {
+   (void)index;
+   (void)enabled;
+   (void)code;
 }
 
 void retro_run(void) {
    if (!g_game_loaded) return;
+
+   static unsigned frame_count = 0;
+   frame_count++;
+   if (frame_count <= 10 || frame_count % 300 == 0) {
+      fprintf(stderr, "[DraStic-Trace] retro_run frame #%u\n", frame_count);
+      fflush(stderr);
+   }
+
    input_poll_cb();
 
-   /* Map Libretro Joypad to DraStic Keys */
-   int keys = 0;
+   uint32_t keys = 0;
+   if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT))  keys |= NDS_KEY_RIGHT;
+   if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT))   keys |= NDS_KEY_LEFT;
+   if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP))     keys |= NDS_KEY_UP;
+   if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN))   keys |= NDS_KEY_DOWN;
    if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A))      keys |= NDS_KEY_A;
    if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B))      keys |= NDS_KEY_B;
    if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X))      keys |= NDS_KEY_X;
