@@ -27,8 +27,8 @@ $(TARGET_SO): $(OBJS) $(LIBLOG) $(LIBOPENSLES)
 pak: $(TARGET_SO) $(LIBLOG) $(LIBOPENSLES)
 	mkdir -p $(PAK_DIR)
 	cp $(TARGET_SO) $(LIBLOG) $(LIBOPENSLES) launch.sh default.cfg $(PAK_DIR)/
-	@if [ -d "../core/android/assets" ]; then \
-		cp -r ../core/android/assets/* $(PAK_DIR)/ 2>/dev/null || true; \
+	@if [ -d "../libs/core/android/assets" ]; then \
+		cp -r ../libs/core/android/assets/* $(PAK_DIR)/ 2>/dev/null || true; \
 	fi
 	@chmod +x $(PAK_DIR)/launch.sh
 	cd dist && zip -r -q NDS.pak.zip NDS.pak
