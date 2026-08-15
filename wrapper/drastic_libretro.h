@@ -20,6 +20,8 @@ typedef jboolean (JNICALL *fn_loadState)(JNIEnv *env, jobject obj, jint slot);
 typedef void (JNICALL *fn_setAutosaveInterval)(JNIEnv *env, jobject obj, jint seconds);
 typedef void (JNICALL *fn_resetDS)(JNIEnv *env, jobject obj);
 typedef void (JNICALL *fn_quitSystem)(JNIEnv *env, jobject obj);
+typedef void (JNICALL *fn_signalScreen)(JNIEnv *env, jobject obj);
+typedef void (JNICALL *fn_waitScreen)(JNIEnv *env, jobject obj);
 
 #ifdef __cplusplus
 }

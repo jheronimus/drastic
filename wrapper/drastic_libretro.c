@@ -57,9 +57,12 @@ static fn_loadState p_loadState = NULL;
 static fn_setAutosaveInterval p_setAutosaveInterval = NULL;
 static fn_resetDS p_resetDS = NULL;
 static fn_quitSystem p_quitSystem = NULL;
+static fn_signalScreen p_signalScreen = NULL;
+static fn_waitScreen p_waitScreen = NULL;
 
 static bool g_initialized = false;
 static bool g_game_loaded = false;
+static struct timespec g_audio_started_at;
 static pthread_t g_start_thread;
 static char g_rom_path[PATH_MAX];
 
@@ -196,6 +199,8 @@ void retro_init(void) {
    p_setAutosaveInterval = (fn_setAutosaveInterval)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_setAutosaveInterval");
    p_resetDS = (fn_resetDS)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_resetDS");
    p_quitSystem = (fn_quitSystem)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_quitSystem");
+   p_signalScreen = (fn_signalScreen)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_signalScreen");
+   p_waitScreen = (fn_waitScreen)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_waitScreen");
 
    if (p_JNI_OnLoad) {
       fprintf(stderr, "[DraStic-Trace] STEP 2: Calling JNI_OnLoad\n");
@@ -448,6 +453,21 @@ void retro_run(void) {
       return;
    }
 
+   /* The boot's renderer setup (3D renderer + DLDI phase) continues for a few
+    * hundred ms after the first audio buffer; touching getScreenBuffers or
+    * signalScreen during it races the boot and crashes the renderer CRC. */
+   if (g_audio_started_at.tv_sec == 0) {
+      clock_gettime(CLOCK_MONOTONIC, &g_audio_started_at);
+   }
+   struct timespec now;
+   clock_gettime(CLOCK_MONOTONIC, &now);
+   long elapsed_ms = (now.tv_sec - g_audio_started_at.tv_sec) * 1000 +
+                     (now.tv_nsec - g_audio_started_at.tv_nsec) / 1000000;
+   if (elapsed_ms < 600) {
+      video_cb(NULL, 0, 0, 0);
+      return;
+   }
+
    static unsigned frame_count = 0;
    frame_count++;
    if (frame_count <= 10 || frame_count % 300 == 0) {
@@ -521,9 +541,6 @@ void retro_run(void) {
    /* Copy both 256x192 ARGB8888 screens via getScreenBuffers, convert to
     * RGB565 for minarch. */
    if (video_ready && p_getScreenBuffers && g_jni_screen_top && g_jni_screen_bottom) {
-      if (p_renderFrame) {
-         p_renderFrame(env, NULL, 0, 0, 0);
-      }
       p_getScreenBuffers(env, NULL, g_jni_screen_top, g_jni_screen_bottom);
 
       jint *top = (jint*)(*env)->GetPrimitiveArrayCritical(env, g_jni_screen_top, NULL);
@@ -542,6 +559,12 @@ void retro_run(void) {
       }
       (*env)->ReleasePrimitiveArrayCritical(env, g_jni_screen_bottom, bot, JNI_ABORT);
       (*env)->ReleasePrimitiveArrayCritical(env, g_jni_screen_top, top, JNI_ABORT);
+
+      /* Release the emulation thread's backpressure wait: it blocks rendering
+       * until the app signals that the presented frame was consumed. */
+      if (p_signalScreen) {
+         p_signalScreen(env, NULL);
+      }
    }
 
    /* Render Output Framebuffer according to g_layout_mode */
