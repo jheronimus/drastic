@@ -267,3 +267,30 @@ int mprotect(void *addr, size_t len, int prot) {
 mode_t __umask_chk(mode_t mask) {
     return umask(mask);
 }
+
+#include <setjmp.h>
+#include <getopt.h>
+
+int _setjmp(jmp_buf env) {
+    return setjmp(env);
+}
+
+void _longjmp(jmp_buf env, int val) {
+    longjmp(env, val);
+}
+
+void *memmem(const void *haystack, size_t haystack_len, const void *needle, size_t needle_len) {
+    const char *h = (const char *)haystack;
+    const char *n = (const char *)needle;
+    if (needle_len == 0) return (void *)h;
+    if (needle_len > haystack_len) return NULL;
+    for (size_t i = 0; i + needle_len <= haystack_len; i++) {
+        if (h[i] == n[0] && memcmp(h + i, n, needle_len) == 0) return (void *)(h + i);
+    }
+    return NULL;
+}
+
+int getopt_long(int argc, char * const argv[], const char *optstring, const struct option *longopts, int *longindex) {
+    (void)argc; (void)argv; (void)optstring; (void)longopts; (void)longindex;
+    return -1;
+}
