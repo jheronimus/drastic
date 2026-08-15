@@ -38,10 +38,12 @@ typedef jobject  jobjectArray;
 typedef jobject  jthrowable;
 typedef void*    jfieldID;
 typedef void*    jmethodID;
+typedef jobject  jweak;
 
 #define JNI_FALSE 0
 #define JNI_TRUE  1
 #define JNI_OK    0
+#define JNI_ABORT 2
 #define JNI_ERR   (-1)
 
 struct JNINativeInterface;
@@ -251,8 +253,8 @@ struct JNINativeInterface {
     jobject (JNICALL *GetObjectArrayElement)(JNIEnv *, jobjectArray, jsize);
     void (JNICALL *SetObjectArrayElement)(JNIEnv *, jobjectArray, jsize, jobject);
 
-    jbyteArray (JNICALL *NewByteArray)(JNIEnv *, jsize);
     jbyteArray (JNICALL *NewBooleanArray)(JNIEnv *, jsize);
+    jbyteArray (JNICALL *NewByteArray)(JNIEnv *, jsize);
     jcharArray (JNICALL *NewCharArray)(JNIEnv *, jsize);
     jshortArray (JNICALL *NewShortArray)(JNIEnv *, jsize);
     jintArray (JNICALL *NewIntArray)(JNIEnv *, jsize);
@@ -260,8 +262,8 @@ struct JNINativeInterface {
     jfloatArray (JNICALL *NewFloatArray)(JNIEnv *, jsize);
     jdoubleArray (JNICALL *NewDoubleArray)(JNIEnv *, jsize);
 
-    jbyte* (JNICALL *GetByteArrayElements)(JNIEnv *, jbyteArray, jboolean *);
     jboolean* (JNICALL *GetBooleanArrayElements)(JNIEnv *, jarray, jboolean *);
+    jbyte* (JNICALL *GetByteArrayElements)(JNIEnv *, jbyteArray, jboolean *);
     jchar* (JNICALL *GetCharArrayElements)(JNIEnv *, jarray, jboolean *);
     jshort* (JNICALL *GetShortArrayElements)(JNIEnv *, jshortArray, jboolean *);
     jint* (JNICALL *GetIntArrayElements)(JNIEnv *, jintArray, jboolean *);
@@ -269,8 +271,8 @@ struct JNINativeInterface {
     jfloat* (JNICALL *GetFloatArrayElements)(JNIEnv *, jfloatArray, jboolean *);
     jdouble* (JNICALL *GetDoubleArrayElements)(JNIEnv *, jdoubleArray, jboolean *);
 
-    void (JNICALL *ReleaseByteArrayElements)(JNIEnv *, jbyteArray, jbyte *, jint);
     void (JNICALL *ReleaseBooleanArrayElements)(JNIEnv *, jarray, jboolean *, jint);
+    void (JNICALL *ReleaseByteArrayElements)(JNIEnv *, jbyteArray, jbyte *, jint);
     void (JNICALL *ReleaseCharArrayElements)(JNIEnv *, jarray, jchar *, jint);
     void (JNICALL *ReleaseShortArrayElements)(JNIEnv *, jshortArray, jshort *, jint);
     void (JNICALL *ReleaseIntArrayElements)(JNIEnv *, jintArray, jint *, jint);
@@ -278,8 +280,8 @@ struct JNINativeInterface {
     void (JNICALL *ReleaseFloatArrayElements)(JNIEnv *, jfloatArray, jfloat *, jint);
     void (JNICALL *ReleaseDoubleArrayElements)(JNIEnv *, jdoubleArray, jdouble *, jint);
 
-    void (JNICALL *GetByteArrayRegion)(JNIEnv *, jbyteArray, jsize, jsize, jbyte *);
     void (JNICALL *GetBooleanArrayRegion)(JNIEnv *, jarray, jsize, jsize, jboolean *);
+    void (JNICALL *GetByteArrayRegion)(JNIEnv *, jbyteArray, jsize, jsize, jbyte *);
     void (JNICALL *GetCharArrayRegion)(JNIEnv *, jarray, jsize, jsize, jchar *);
     void (JNICALL *GetShortArrayRegion)(JNIEnv *, jshortArray, jsize, jsize, jshort *);
     void (JNICALL *GetIntArrayRegion)(JNIEnv *, jintArray, jsize, jsize, jint *);
@@ -287,8 +289,8 @@ struct JNINativeInterface {
     void (JNICALL *GetFloatArrayRegion)(JNIEnv *, jfloatArray, jsize, jsize, jfloat *);
     void (JNICALL *GetDoubleArrayRegion)(JNIEnv *, jdoubleArray, jsize, jsize, jdouble *);
 
-    void (JNICALL *SetByteArrayRegion)(JNIEnv *, jbyteArray, jsize, jsize, const jbyte *);
     void (JNICALL *SetBooleanArrayRegion)(JNIEnv *, jarray, jsize, jsize, const jboolean *);
+    void (JNICALL *SetByteArrayRegion)(JNIEnv *, jbyteArray, jsize, jsize, const jbyte *);
     void (JNICALL *SetCharArrayRegion)(JNIEnv *, jarray, jsize, jsize, const jchar *);
     void (JNICALL *SetShortArrayRegion)(JNIEnv *, jshortArray, jsize, jsize, const jshort *);
     void (JNICALL *SetIntArrayRegion)(JNIEnv *, jintArray, jsize, jsize, const jint *);
@@ -296,11 +298,26 @@ struct JNINativeInterface {
     void (JNICALL *SetFloatArrayRegion)(JNIEnv *, jfloatArray, jsize, jsize, const jfloat *);
     void (JNICALL *SetDoubleArrayRegion)(JNIEnv *, jdoubleArray, jsize, jsize, const jdouble *);
 
+    jint (JNICALL *RegisterNatives)(JNIEnv *, jclass, const void *, jint);
+    jint (JNICALL *UnregisterNatives)(JNIEnv *, jclass);
+
+    jint (JNICALL *MonitorEnter)(JNIEnv *, jobject);
+    jint (JNICALL *MonitorExit)(JNIEnv *, jobject);
+    jint (JNICALL *GetJavaVM)(JNIEnv *, void **);
+
+    void (JNICALL *GetStringRegion)(JNIEnv *, jstring, jsize, jsize, jchar *);
+    void (JNICALL *GetStringUTFRegion)(JNIEnv *, jstring, jsize, jsize, char *);
+
     void* (JNICALL *GetPrimitiveArrayCritical)(JNIEnv *, jarray, jboolean *);
     void (JNICALL *ReleasePrimitiveArrayCritical)(JNIEnv *, jarray, void *, jint);
 
-    jint (JNICALL *RegisterNatives)(JNIEnv *, jclass, const void *, jint);
-    jint (JNICALL *UnregisterNatives)(JNIEnv *, jclass);
+    const jchar* (JNICALL *GetStringCritical)(JNIEnv *, jstring, jboolean *);
+    void (JNICALL *ReleaseStringCritical)(JNIEnv *, jstring, const jchar *);
+
+    jweak (JNICALL *NewWeakGlobalRef)(JNIEnv *, jobject);
+    void (JNICALL *DeleteWeakGlobalRef)(JNIEnv *, jweak);
+
+    jboolean (JNICALL *ExceptionCheck)(JNIEnv *);
 };
 
 struct JNIInvokeInterface {

@@ -49,6 +49,12 @@ typedef struct {
 
 typedef const SLInterfaceID_struct* SLInterfaceID;
 
+/* Set by the libretro wrapper: receives raw stereo int16 samples. */
+extern void (*g_drastic_audio_batch)(const void *data, size_t frames);
+
+/* Set on the first audio buffer: the core has finished booting. */
+extern int g_drastic_audio_started;
+
 extern const SLInterfaceID SL_IID_ANDROIDSIMPLEBUFFERQUEUE;
 extern const SLInterfaceID SL_IID_BUFFERQUEUE;
 extern const SLInterfaceID SL_IID_ENGINE;

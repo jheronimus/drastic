@@ -109,6 +109,16 @@ static jbyteArray JNICALL mock_NewByteArray(JNIEnv *env, jsize len) {
     return (jbyteArray)((char*)mem + sizeof(jsize));
 }
 
+static jintArray JNICALL mock_NewIntArray(JNIEnv *env, jsize len) {
+    (void)env;
+    fprintf(stderr, "[JNI-Mock] NewIntArray len=%d\n", len);
+    fflush(stderr);
+    void *mem = malloc(sizeof(jsize) + len * sizeof(jint));
+    if (!mem) return NULL;
+    *(jsize*)mem = len;
+    return (jintArray)((char*)mem + sizeof(jsize));
+}
+
 static jshortArray JNICALL mock_NewShortArray(JNIEnv *env, jsize len) {
     (void)env;
     fprintf(stderr, "[JNI-Mock] NewShortArray len=%d\n", len);
@@ -178,11 +188,16 @@ static jclass JNICALL mock_FindClass(JNIEnv *env, const char *name) {
     return (jclass)0x100;
 }
 
+static char g_method_name[128] = "";
+
 static jmethodID JNICALL mock_GetMethodID(JNIEnv *env, jclass clazz, const char *name, const char *sig) {
     (void)env;
     (void)clazz;
     fprintf(stderr, "[JNI-Mock] GetMethodID: name=%s sig=%s\n", name ? name : "", sig ? sig : "");
     fflush(stderr);
+    if (name) {
+        snprintf(g_method_name, sizeof(g_method_name), "%s", name);
+    }
     return (jmethodID)0x200;
 }
 
@@ -274,6 +289,13 @@ static jobject JNICALL mock_CallStaticObjectMethodV(JNIEnv *env, jclass clazz, j
         fprintf(stderr, "[JNI-Mock] DraSticPathCache.open('%s', '%s') -> fd=%d (fullpath=%s)\n",
                 path ? path : "", mode ? mode : "", fd, fullpath);
         fflush(stderr);
+
+        if (fd < 0) {
+            /* DraStic's Android open() returns null when a file cannot be
+             * opened; the core checks the handle, not the fd, so a handle
+             * with fd=-1 makes it read from an invalid descriptor (EBADF). */
+            return NULL;
+        }
 
         MockPathHandle *handle = (MockPathHandle*)calloc(1, sizeof(MockPathHandle));
         if (handle) {
@@ -375,9 +397,16 @@ static void JNICALL mock_ExceptionDescribe(JNIEnv *env) {
     (void)env;
 }
 
-static intptr_t JNICALL mock_DummyRetZero(void) {
+static intptr_t JNICALL mock_CallLogged(const char *what) {
+    fprintf(stderr, "[JNI-Mock] %s: %s\n", what, g_method_name[0] ? g_method_name : "?");
+    fflush(stderr);
     return 0;
 }
+static intptr_t JNICALL mock_CallObjectMethod(void) { return mock_CallLogged("CallObjectMethod"); }
+static intptr_t JNICALL mock_CallBooleanMethod(void) { return mock_CallLogged("CallBooleanMethod"); }
+static intptr_t JNICALL mock_CallIntMethod(void) { return mock_CallLogged("CallIntMethod"); }
+static intptr_t JNICALL mock_CallLongMethod(void) { return mock_CallLogged("CallLongMethod"); }
+static intptr_t JNICALL mock_CallVoidMethod(void) { return mock_CallLogged("CallVoidMethod"); }
 
 static const struct JNINativeInterface g_jni_functions = {
     .GetVersion = mock_GetVersion,
@@ -419,6 +448,7 @@ static const struct JNINativeInterface g_jni_functions = {
     .GetArrayLength = mock_GetArrayLength,
     .NewByteArray = mock_NewByteArray,
     .NewShortArray = mock_NewShortArray,
+    .NewIntArray = mock_NewIntArray,
 
     .GetByteArrayElements = mock_GetByteArrayElements,
     .GetShortArrayElements = mock_GetShortArrayElements,
@@ -432,25 +462,25 @@ static const struct JNINativeInterface g_jni_functions = {
     .RegisterNatives = mock_RegisterNatives,
     .UnregisterNatives = mock_UnregisterNatives,
 
-    .CallObjectMethod = (void*)mock_DummyRetZero,
-    .CallBooleanMethod = (void*)mock_DummyRetZero,
-    .CallByteMethod = (void*)mock_DummyRetZero,
-    .CallCharMethod = (void*)mock_DummyRetZero,
-    .CallShortMethod = (void*)mock_DummyRetZero,
-    .CallIntMethod = (void*)mock_DummyRetZero,
-    .CallLongMethod = (void*)mock_DummyRetZero,
-    .CallFloatMethod = (void*)mock_DummyRetZero,
-    .CallDoubleMethod = (void*)mock_DummyRetZero,
-    .CallVoidMethod = (void*)mock_DummyRetZero,
+    .CallObjectMethod = (void*)mock_CallObjectMethod,
+    .CallBooleanMethod = (void*)mock_CallBooleanMethod,
+    .CallByteMethod = (void*)mock_CallLogged,
+    .CallCharMethod = (void*)mock_CallLogged,
+    .CallShortMethod = (void*)mock_CallLogged,
+    .CallIntMethod = (void*)mock_CallIntMethod,
+    .CallLongMethod = (void*)mock_CallLongMethod,
+    .CallFloatMethod = (void*)mock_CallLogged,
+    .CallDoubleMethod = (void*)mock_CallLogged,
+    .CallVoidMethod = (void*)mock_CallVoidMethod,
 
-    .CallStaticByteMethod = (void*)mock_DummyRetZero,
-    .CallStaticCharMethod = (void*)mock_DummyRetZero,
-    .CallStaticShortMethod = (void*)mock_DummyRetZero,
-    .CallStaticIntMethod = (void*)mock_DummyRetZero,
-    .CallStaticLongMethod = (void*)mock_DummyRetZero,
-    .CallStaticFloatMethod = (void*)mock_DummyRetZero,
-    .CallStaticDoubleMethod = (void*)mock_DummyRetZero,
-    .CallStaticVoidMethod = (void*)mock_DummyRetZero,
+    .CallStaticByteMethod = (void*)mock_CallLogged,
+    .CallStaticCharMethod = (void*)mock_CallLogged,
+    .CallStaticShortMethod = (void*)mock_CallLogged,
+    .CallStaticIntMethod = (void*)mock_CallLogged,
+    .CallStaticLongMethod = (void*)mock_CallLogged,
+    .CallStaticFloatMethod = (void*)mock_CallLogged,
+    .CallStaticDoubleMethod = (void*)mock_CallLogged,
+    .CallStaticVoidMethod = (void*)mock_CallLogged,
 };
 
 static const struct JNINativeInterface* g_jni_env_ptr = &g_jni_functions;
