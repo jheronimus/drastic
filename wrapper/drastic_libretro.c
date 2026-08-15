@@ -535,12 +535,18 @@ void retro_run(void) {
       p_updateInput(env, NULL, (jint)keys, touchXY, touched ? JNI_TRUE : JNI_FALSE);
    }
 
-   /* The renderer is live once the frame counter advances past 0. */
-   bool video_ready = ((unsigned)frame_info & 0xffff) > 0;
+   bool video_ready = true;
 
    /* Copy both 256x192 ARGB8888 screens via getScreenBuffers, convert to
     * RGB565 for minarch. */
    if (video_ready && p_getScreenBuffers && g_jni_screen_top && g_jni_screen_bottom) {
+      /* Signal first: it releases the emulation's backpressure, which flips
+       * the render double-buffer so the freshly rendered frame becomes current.
+       * Then copy it out. */
+      if (p_signalScreen) {
+         p_signalScreen(env, NULL);
+         usleep(10000);
+      }
       p_getScreenBuffers(env, NULL, g_jni_screen_top, g_jni_screen_bottom);
 
       jint *top = (jint*)(*env)->GetPrimitiveArrayCritical(env, g_jni_screen_top, NULL);
@@ -559,12 +565,6 @@ void retro_run(void) {
       }
       (*env)->ReleasePrimitiveArrayCritical(env, g_jni_screen_bottom, bot, JNI_ABORT);
       (*env)->ReleasePrimitiveArrayCritical(env, g_jni_screen_top, top, JNI_ABORT);
-
-      /* Release the emulation thread's backpressure wait: it blocks rendering
-       * until the app signals that the presented frame was consumed. */
-      if (p_signalScreen) {
-         p_signalScreen(env, NULL);
-      }
    }
 
    /* Render Output Framebuffer according to g_layout_mode */

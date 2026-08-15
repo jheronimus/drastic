@@ -288,6 +288,29 @@ static jobject JNICALL mock_CallStaticObjectMethodV(JNIEnv *env, jclass clazz, j
             }
         }
 
+        /* DraStic allocates the ROM buffer from the NDS header's declared size
+         * (offset 0x80) but CRCs the file's actual size. Padded ROMs (file
+         * larger than declared) therefore overrun the buffer. Match DraStic's
+         * "trim roms" behavior: patch the header size field to the file size. */
+        if (fd >= 0 && is_read_only) {
+            struct stat st;
+            if (fstat(fd, &st) == 0 && st.st_size >= 0x84) {
+                unsigned int hdr_size = 0;
+                ssize_t got = pread(fd, &hdr_size, 4, 0x80);
+                if (got == 4 && hdr_size != 0 && hdr_size < (unsigned int)st.st_size) {
+                    int wfd = open(fullpath, O_RDWR);
+                    if (wfd >= 0) {
+                        unsigned int real = (unsigned int)st.st_size;
+                        pwrite(wfd, &real, 4, 0x80);
+                        close(wfd);
+                        fprintf(stderr, "[JNI-Mock] ROM header size patched 0x%x -> 0x%x (%s)\n",
+                                hdr_size, real, path ? path : "");
+                        fflush(stderr);
+                    }
+                }
+            }
+        }
+
         fprintf(stderr, "[JNI-Mock] DraSticPathCache.open('%s', '%s') -> fd=%d (fullpath=%s)\n",
                 path ? path : "", mode ? mode : "", fd, fullpath);
         fflush(stderr);

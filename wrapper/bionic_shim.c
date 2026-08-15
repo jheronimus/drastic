@@ -241,7 +241,6 @@ static void bq_push_played(const void *buf, unsigned int size) {
 
 static void *bq_worker(void *arg) {
     (void)arg;
-    int first = 1;
     for (;;) {
         pthread_mutex_lock(&g_bq_mutex);
         while (g_bq_n == 0) {
@@ -260,16 +259,8 @@ static void *bq_worker(void *arg) {
             audio(buf, size / 4);
         }
 
-        /* The emulation thread is paced by the buffer-consumption callback;
-         * holding the first callback back ~600 ms lets the boot's renderer
-         * setup (which races the emulation otherwise) finish first. */
-        double sec;
-        if (first) {
-            sec = 0.6;
-            first = 0;
-        } else {
-            sec = (double)size / (4.0 * 44100.0);
-        }
+        /* The emulation thread is paced by the buffer-consumption callback. */
+        double sec = (double)size / (4.0 * 44100.0);
         struct timespec ts;
         ts.tv_sec = (time_t)sec;
         ts.tv_nsec = (long)((sec - (double)ts.tv_sec) * 1e9);
