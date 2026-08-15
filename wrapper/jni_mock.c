@@ -14,20 +14,22 @@
 extern char g_system_dir[512];
 extern char g_save_dir[512];
 
-/* NativePathHandle layout matching libdrastic_arm64.so struct offsets:
+/* NativePathHandle layout matching libdrastic_arm64.so struct offsets
+ * (verified by disassembly of the file-open helper at 0x1b4d4: it reads the
+ * fd with `ldr w0, [x0, #8]` and falls back to `fopen([x0])` on a negative fd):
  * offset  0: char *filePath
- * offset  8: char *fileName
- * offset 16: int fileFd
+ * offset  8: int fileFd
+ * offset 16: char *fileName
  */
 typedef struct {
     char *filePath;
-    char *fileName;
     int fileFd;
+    char *fileName;
 } MockPathHandle;
 
 static jfieldID g_field_filePath = (jfieldID)0;
-static jfieldID g_field_fileName = (jfieldID)8;
-static jfieldID g_field_fileFd   = (jfieldID)16;
+static jfieldID g_field_fileName = (jfieldID)16;
+static jfieldID g_field_fileFd   = (jfieldID)8;
 
 static jmethodID g_method_open = (jmethodID)0x401;
 static jmethodID g_method_rename = (jmethodID)0x402;
