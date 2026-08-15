@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -88,4 +89,30 @@ int ioctl(int fd, int req, ...) {
         if (ftruncate(fd, (off_t)size) == 0) return 0;
     }
     return real_ioctl(fd, req, arg);
+}
+
+/* Diagnose the core's fixed-address munmap+mmap scratch-region dance. */
+typedef void *(*mmap_fn)(void *, size_t, int, int, int, off_t);
+typedef int (*munmap_fn)(void *, size_t);
+static mmap_fn real_mmap;
+static munmap_fn real_munmap;
+
+void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
+    if (!real_mmap) real_mmap = (mmap_fn)dlsym(RTLD_NEXT, "mmap");
+    void *r = real_mmap(addr, length, prot, flags, fd, offset);
+    if (addr != NULL && addr != (void *)-1 && r != addr) {
+        fprintf(stderr, "[ashmem] mmap hint=%p len=%zu -> %p (mismatch!)\n", addr, length, r);
+        fflush(stderr);
+    }
+    return r;
+}
+
+int munmap(void *addr, size_t length) {
+    if (!real_munmap) real_munmap = (munmap_fn)dlsym(RTLD_NEXT, "munmap");
+    int r = real_munmap(addr, length);
+    if (r != 0) {
+        fprintf(stderr, "[ashmem] munmap(%p, %zu) FAILED %d\n", addr, length, r);
+        fflush(stderr);
+    }
+    return r;
 }

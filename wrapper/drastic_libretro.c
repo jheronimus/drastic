@@ -545,7 +545,6 @@ void retro_run(void) {
        * Then copy it out. */
       if (p_signalScreen) {
          p_signalScreen(env, NULL);
-         usleep(10000);
       }
       p_getScreenBuffers(env, NULL, g_jni_screen_top, g_jni_screen_bottom);
 
