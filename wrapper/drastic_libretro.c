@@ -403,7 +403,7 @@ static void state_temp_path(char *out, size_t outsz) {
 }
 
 bool retro_serialize(void *data, size_t size) {
-   if (!g_game_loaded || !p_saveState || !data) return false;
+   if (!g_game_loaded || !g_drastic_audio_started || !p_saveState || !data) return false;
    JNIEnv *env = get_mock_jni_env();
    /* Blocking save (async=1); the core writes <savestates>/_savestate_temp.dss. */
    p_saveState(env, NULL, SAVE_SLOT, JNI_TRUE);
@@ -418,7 +418,7 @@ bool retro_serialize(void *data, size_t size) {
 }
 
 bool retro_unserialize(const void *data, size_t size) {
-   if (!g_game_loaded || !p_loadState || !data) return false;
+   if (!g_game_loaded || !g_drastic_audio_started || !p_loadState || !data) return false;
    char path[1100];
    state_temp_path(path, sizeof(path));
    FILE *f = fopen(path, "wb");
