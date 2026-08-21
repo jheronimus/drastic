@@ -115,8 +115,21 @@ static pthread_mutex_t g_guard_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef void *(*mmap_fn)(void *, size_t, int, int, int, off_t);
 typedef int (*munmap_fn)(void *, size_t);
+typedef ssize_t (*read_fn)(int, void *, size_t);
+typedef int (*close_fn)(int);
 static mmap_fn real_mmap;
 static munmap_fn real_munmap;
+static read_fn real_read;
+static close_fn real_close;
+
+static void guard_drop(int i);
+
+static unsigned hexval(char c) {
+    if (c >= '0' && c <= '9') return (unsigned)(c - '0');
+    if (c >= 'a' && c <= 'f') return (unsigned)(c - 'a' + 10);
+    if (c >= 'A' && c <= 'F') return (unsigned)(c - 'A' + 10);
+    return 0;
+}
 
 static size_t guarded_bytes(void) {
     size_t total = 0;
@@ -138,12 +151,78 @@ static int guard_covering(void *addr, size_t len) {
 }
 
 static int guard_slot_for(void *addr) {
+    static unsigned g_guard_next;
     int free_i = -1;
     for (int i = 0; i < GUARD_MAX; i++) {
         if (g_guards[i].base == addr) return i;
         if (!g_guards[i].base && free_i < 0) free_i = i;
     }
+    /* FIFO eviction: the table must keep tracking the allocator's most
+     * recent hints even when unrelated 16 KB mappings flood it. */
+    if (free_i < 0) free_i = (int)(g_guard_next++ % GUARD_MAX);
+    guard_drop(free_i);
     return free_i;
+}
+
+/* Release every guard overlapping [addr, addr+len). */
+static void guard_release_overlapping(void *addr, size_t len) {
+    for (int i = 0; i < GUARD_MAX; i++) {
+        if (!g_guards[i].base) continue;
+        char *b = (char *)g_guards[i].base;
+        if (b < (char *)addr + len && b + g_guards[i].len > (char *)addr) {
+            fprintf(stderr, "[ashmem] guard %p+%zu released for mmap %p+%zu\n",
+                    g_guards[i].base, g_guards[i].len, addr, len);
+            fflush(stderr);
+            guard_drop(i);
+        }
+    }
+}
+
+/* True when no VMA intersects [addr, addr+len) — read via raw syscalls so
+ * the interposer never takes malloc's locks while another thread may hold
+ * them inside its own mmap call. */
+static int range_is_free(void *addr, size_t len) {
+    if (!real_read) real_read = (read_fn)dlsym(RTLD_NEXT, "read");
+    if (!real_close) real_close = (close_fn)dlsym(RTLD_NEXT, "close");
+    int fd = real_open("/proc/self/maps", O_RDONLY);
+    if (fd < 0) return 0;
+
+    static char buf[8192];
+    char line[512];
+    size_t have = 0, fill = 0;
+    uintptr_t want_lo = (uintptr_t)addr, want_hi = want_lo + len;
+    int is_free = 1;
+
+    for (;;) {
+        ssize_t got = real_read(fd, buf, sizeof(buf));
+        if (got <= 0) break;
+        fill = (size_t)got;
+        size_t pos = 0;
+        while (pos < fill) {
+            char *nl = memchr(buf + pos, '\n', fill - pos);
+            size_t take = nl ? (size_t)(nl - (buf + pos)) : fill - pos;
+            if (have + take < sizeof(line)) {
+                memcpy(line + have, buf + pos, take);
+                have += take;
+            }
+            pos += take;
+            if (!nl) break; /* partial line: refilled on next read */
+            line[have] = '\0';
+            uintptr_t s = 0, e = 0;
+            char *p = line;
+            while (*p && *p != '-') s = (s << 4) | hexval(*p++);
+            if (*p == '-') {
+                p++;
+                while (*p && *p != ' ') e = (e << 4) | hexval(*p++);
+            }
+            if (e > want_lo && s < want_hi) { is_free = 0; break; }
+            have = 0;
+            if (!is_free) break;
+        }
+        if (!is_free) break;
+    }
+    real_close(fd);
+    return is_free;
 }
 
 static void guard_drop(int i) {
@@ -158,20 +237,13 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 
     if (addr != NULL && !(flags & MAP_FIXED)) {
         pthread_mutex_lock(&g_guard_mutex);
-        int i = guard_covering(addr, length);
-        if (i >= 0) {
-            fprintf(stderr, "[ashmem] guard %p+%zu released for hinted mmap %p+%zu\n",
-                    g_guards[i].base, g_guards[i].len, addr, length);
-            fflush(stderr);
-            guard_drop(i);
-        }
+        guard_release_overlapping(addr, length);
         pthread_mutex_unlock(&g_guard_mutex);
     } else if (addr != NULL) {
         /* MAP_FIXED would silently replace our PROT_NONE pages; clear the
          * table entry so a later drop cannot unmap the core's live region. */
         pthread_mutex_lock(&g_guard_mutex);
-        int i = guard_covering(addr, length);
-        if (i >= 0) guard_drop(i);
+        guard_release_overlapping(addr, length);
         pthread_mutex_unlock(&g_guard_mutex);
     }
 
@@ -179,21 +251,30 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 
     if (addr != NULL && !(flags & MAP_FIXED)) {
         if (r != addr && r != MAP_FAILED) {
-            fprintf(stderr, "[ashmem] mmap hint=%p len=%zu -> %p (mismatch!)\n",
-                    addr, length, r);
-            fflush(stderr);
-        } else if (r == addr) {
+            /* The kernel placed the mapping elsewhere although the hinted
+             * range may simply have been skipped by its top-down search.
+             * When /proc/self/maps shows the range free, enforce the hint. */
+            int free = range_is_free(addr, length);
+            if (free) {
+                void *f = real_mmap(addr, length, prot, flags | MAP_FIXED, fd, offset);
+                fprintf(stderr, "[ashmem] hint=%p len=%zu -> %p; fixed retry %s\n",
+                        addr, length, r, f == addr ? "ok" : "failed");
+                fflush(stderr);
+                r = f;
+            } else {
+                fprintf(stderr, "[ashmem] mmap hint=%p len=%zu -> %p (range occupied)\n",
+                        addr, length, r);
+                fflush(stderr);
+            }
+        }
+        if (r == addr) {
             /* Tag this hinted mapping: its later munmap gets guarded. */
             pthread_mutex_lock(&g_guard_mutex);
             int i = guard_slot_for(addr);
-            if (i < 0) {
-                fprintf(stderr, "[ashmem] guard table full, hint %p untracked\n", addr);
-            } else {
-                guard_drop(i);
-                g_guards[i].base = addr;
-                g_guards[i].len = length;
-                g_guards[i].armed = 0;
-            }
+            guard_drop(i);
+            g_guards[i].base = addr;
+            g_guards[i].len = length;
+            g_guards[i].armed = 0;
             pthread_mutex_unlock(&g_guard_mutex);
         }
     }
