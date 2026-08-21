@@ -11,5 +11,5 @@ mkdir -p "$BIOS_PATH/$EMU_TAG"
 mkdir -p "$SAVES_PATH/$EMU_TAG"
 HOME="$USERDATA_PATH"
 cd "$HOME" || exit 1
-export LD_PRELOAD="$CORES_PATH/liblog.so"
-PATH="$SYSTEM_PATH/bin:$PATH" minarch.elf "$CORES_PATH/${EMU_EXE}_libretro.so" "$ROM" > "$LOGS_PATH/$EMU_TAG.txt" 2>&1
+export LD_PRELOAD="$CORES_PATH/libashmem.so:$CORES_PATH/libandroid.so:$CORES_PATH/liblog.so"
+PATH="$SYSTEM_PATH/bin:$PATH" minarch.elf "$CORES_PATH/${EMU_EXE}_libretro.so" "$ROM" >"$LOGS_PATH/$EMU_TAG.txt" 2>&1
