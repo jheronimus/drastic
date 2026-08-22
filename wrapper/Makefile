@@ -43,6 +43,10 @@ pak: $(TARGET_SO) $(SHIMS)
 	cd dist && zip -r -q NDS.pak.zip NDS.pak
 	@echo "[DraStic] NDS.pak created in $(PAK_DIR)/ and dist/NDS.pak.zip"
 
+check: $(TARGET_SO) $(SHIMS)
+	$(CC) $(CFLAGS) -I. -o tests/frontend_smoke tests/frontend_smoke.c -ldl
+	./tests/frontend_smoke
+
 clean:
-	rm -f $(OBJS) $(TARGET_SO) $(SHIMS)
+	rm -f $(OBJS) $(TARGET_SO) $(SHIMS) tests/frontend_smoke
 	rm -rf dist/

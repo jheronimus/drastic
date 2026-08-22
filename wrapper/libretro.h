@@ -57,6 +57,7 @@ extern "C" {
 #define RETRO_ENVIRONMENT_SET_ROTATION  1
 #define RETRO_ENVIRONMENT_GET_OVERSCAN  2
 #define RETRO_ENVIRONMENT_GET_CAN_DUPLICATE 3
+#define RETRO_ENVIRONMENT_GET_CAN_DUPE RETRO_ENVIRONMENT_GET_CAN_DUPLICATE
 #define RETRO_ENVIRONMENT_SET_MESSAGE   6
 #define RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL 8
 #define RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY 9
@@ -68,8 +69,40 @@ extern "C" {
 #define RETRO_ENVIRONMENT_SET_VARIABLES 16
 #define RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE 17
 #define RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME 18
-#define RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY 27
+#define RETRO_ENVIRONMENT_GET_LOG_INTERFACE 27
+#define RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO 32
+#define RETRO_ENVIRONMENT_SET_CONTROLLER_INFO 35
+#define RETRO_ENVIRONMENT_SET_GEOMETRY 37
+#define RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY 31
 #define RETRO_ENVIRONMENT_SET_CORE_OPTIONS 52
+
+enum retro_log_level
+{
+   RETRO_LOG_DEBUG = 0,
+   RETRO_LOG_INFO,
+   RETRO_LOG_WARN,
+   RETRO_LOG_ERROR,
+   RETRO_LOG_DUMMY = INT_MAX
+};
+
+typedef void (*retro_log_printf_t)(enum retro_log_level level, const char *fmt, ...);
+
+struct retro_log_callback
+{
+   retro_log_printf_t log;
+};
+
+struct retro_controller_description
+{
+   const char *desc;
+   unsigned id;
+};
+
+struct retro_controller_info
+{
+   const struct retro_controller_description *types;
+   unsigned num_types;
+};
 
 enum retro_pixel_format
 {

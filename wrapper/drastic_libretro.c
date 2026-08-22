@@ -86,6 +86,12 @@ static enum layout_mode g_layout_mode = LAYOUT_VERTICAL;
 static enum touch_mode g_touch_mode = TOUCH_MODE_TOUCHSCREEN;
 static bool g_active_screen = false; /* false = top, true = bottom */
 
+/* Frontend-provided logger; falls back to stderr. */
+static retro_log_printf_t g_log = NULL;
+
+#define LOGI(...) do { if (g_log) g_log(RETRO_LOG_INFO, __VA_ARGS__); else fprintf(stderr, __VA_ARGS__); } while (0)
+#define LOGW(...) do { if (g_log) g_log(RETRO_LOG_WARN, __VA_ARGS__); else fprintf(stderr, __VA_ARGS__); } while (0)
+
 static int g_cursor_x = 128;
 static int g_cursor_y = 96;
 
@@ -101,7 +107,22 @@ void retro_set_environment(retro_environment_t cb) {
       { "drastic_touch_mode", "Touch Mode; Physical Touchscreen|Analog Cursor" },
       { NULL, NULL }
    };
-   environ_cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void*)vars);
+   cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void*)vars);
+
+   static const struct retro_controller_description port1[] = {
+      { "Nintendo DS", RETRO_DEVICE_JOYPAD },
+      { NULL, 0 },
+   };
+   static const struct retro_controller_info ports[] = {
+      { port1, 1 },
+      { NULL, 0 },
+   };
+   cb(RETRO_ENVIRONMENT_SET_CONTROLLER_INFO, (void*)ports);
+
+   struct retro_log_callback log;
+   if (cb(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &log)) {
+      g_log = log.log;
+   }
 }
 
 void retro_set_video_refresh(retro_video_refresh_t cb) { video_cb = cb; }
@@ -121,6 +142,7 @@ void retro_set_input_state(retro_input_state_t cb) { input_state_cb = cb; }
 
 static void update_variables(void) {
    struct retro_variable var = {0};
+   enum layout_mode prev_layout = g_layout_mode;
 
    var.key = "drastic_screen_layout";
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
@@ -139,12 +161,20 @@ static void update_variables(void) {
       else
          g_touch_mode = TOUCH_MODE_TOUCHSCREEN;
    }
+
+   /* Layout changes reshape the output; tell the frontend so scalers and
+    * the aspect ratio follow without a reload. */
+   if (g_layout_mode != prev_layout && environ_cb) {
+      struct retro_system_av_info av;
+      retro_get_system_av_info(&av);
+      environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &av.geometry);
+   }
 }
 
 void retro_init(void) {
    enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_RGB565;
    if (!environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt)) {
-      fprintf(stderr, "[DraStic-Libretro] RGB565 pixel format rejected by frontend\n");
+      LOGW("[DraStic] RGB565 pixel format rejected by frontend");
    }
 
    const char *dir = NULL;
@@ -181,12 +211,9 @@ void retro_init(void) {
    /* Load libdrastic_arm64.so dynamically if available */
    g_drastic_handle = dlopen(DRASTIC_LIB_NAME, RTLD_LAZY | RTLD_GLOBAL);
    if (!g_drastic_handle) {
-      fprintf(stderr, "[DraStic-Libretro] Unable to load %s: %s\n", DRASTIC_LIB_NAME, dlerror());
+      LOGW("[DraStic] unable to load %s: %s (proprietary core not installed)", DRASTIC_LIB_NAME, dlerror());
       return;
    }
-
-   fprintf(stderr, "[DraStic-Trace] STEP 1: retro_init start\n");
-   fflush(stderr);
    p_JNI_OnLoad = (fn_JNI_OnLoad)dlsym(g_drastic_handle, "JNI_OnLoad");
    p_onInit = (fn_onInit)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_onInit");
    p_startGame = (fn_startGame)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_startGame");
@@ -203,22 +230,15 @@ void retro_init(void) {
    p_waitScreen = (fn_waitScreen)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_waitScreen");
 
    if (p_JNI_OnLoad) {
-      fprintf(stderr, "[DraStic-Trace] STEP 2: Calling JNI_OnLoad\n");
-      fflush(stderr);
       p_JNI_OnLoad(get_mock_java_vm(), NULL);
    }
 
    JNIEnv *env = get_mock_jni_env();
    if (p_onInit && env) {
-      fprintf(stderr, "[DraStic-Trace] STEP 3: Calling onInit sys_dir=%s save_dir=%s\n", g_system_dir, g_save_dir);
-      fflush(stderr);
       jstring path = (*env)->NewStringUTF(env, g_system_dir);
       jstring savePath = (*env)->NewStringUTF(env, g_save_dir);
       p_onInit(env, NULL, path, savePath);
    }
-
-   fprintf(stderr, "[DraStic-Trace] STEP 4: Creating screen arrays\n");
-   fflush(stderr);
    g_jni_screen_top = (*env)->NewIntArray(env, NDS_SCREEN_W * NDS_SCREEN_H);
    g_jni_screen_bottom = (*env)->NewIntArray(env, NDS_SCREEN_W * NDS_SCREEN_H);
 
@@ -226,21 +246,24 @@ void retro_init(void) {
       p_setAutosaveInterval(env, NULL, 30);
    }
 
-   g_initialized = true;
-   fprintf(stderr, "[DraStic-Trace] STEP 5: retro_init complete\n");
-   fflush(stderr);
-}
+   g_initialized = true;}
 
 void retro_deinit(void) {
-   if (g_initialized && p_quitSystem) {
-      JNIEnv *env = get_mock_jni_env();
-      p_quitSystem(env, NULL);
-   }
-   if (g_drastic_handle) {
-      dlclose(g_drastic_handle);
-      g_drastic_handle = NULL;
-   }
-   g_initialized = false;
+    if (g_initialized && p_quitSystem) {
+       JNIEnv *env = get_mock_jni_env();
+       p_quitSystem(env, NULL);
+    }
+    /* startGame blocks until game exit; quitSystem is what makes it return.
+     * Join before dlclose or the still-running thread executes unmapped code. */
+    if (g_start_thread) {
+       pthread_join(g_start_thread, NULL);
+       g_start_thread = 0;
+    }
+    if (g_drastic_handle) {
+       dlclose(g_drastic_handle);
+       g_drastic_handle = NULL;
+    }
+    g_initialized = false;
 }
 
 unsigned retro_api_version(void) { return RETRO_API_VERSION; }
@@ -255,11 +278,27 @@ void retro_get_system_info(struct retro_system_info *info) {
 }
 
 void retro_get_system_av_info(struct retro_system_av_info *av) {
-   av->geometry.base_width   = 256;
-   av->geometry.base_height  = 384;
+   memset(av, 0, sizeof(*av));
+   switch (g_layout_mode) {
+   case LAYOUT_SINGLE:
+      av->geometry.base_width   = 256;
+      av->geometry.base_height  = 192;
+      av->geometry.aspect_ratio = 256.0f / 192.0f;
+      break;
+   case LAYOUT_HORIZONTAL:
+      av->geometry.base_width   = 512;
+      av->geometry.base_height  = 192;
+      av->geometry.aspect_ratio = 512.0f / 192.0f;
+      break;
+   case LAYOUT_VERTICAL:
+   default:
+      av->geometry.base_width   = 256;
+      av->geometry.base_height  = 384;
+      av->geometry.aspect_ratio = 256.0f / 384.0f;
+      break;
+   }
    av->geometry.max_width    = 512;
    av->geometry.max_height   = 384;
-   av->geometry.aspect_ratio = 256.0f / 384.0f;
    av->timing.fps            = 60.0;
    av->timing.sample_rate    = 44100.0;
 }
@@ -280,12 +319,9 @@ static void *startgame_thread(void *arg) {
    (void)arg;
    JNIEnv *env = get_mock_jni_env();
    jstring rom = (*env)->NewStringUTF(env, g_rom_path);
-   fprintf(stderr, "[DraStic-Trace] STEP 7: Calling startGame rom=%s (async thread)\n", g_rom_path);
-   fflush(stderr);
    int result = p_startGame(env, NULL, rom);
-   fprintf(stderr, "[DraStic-Trace] STEP 8: startGame returned result=%d\n", result);
-   fflush(stderr);
    if (!result) {
+      LOGW("[DraStic] startGame failed for %s", g_rom_path);
       g_game_loaded = false;
    }
    return NULL;
@@ -308,7 +344,7 @@ static void save_ram_setup(const struct retro_game_info *game) {
 
    int fd = open(g_battery_path, O_RDWR | O_CREAT, 0666);
    if (fd < 0) {
-      fprintf(stderr, "[DraStic-Trace] SAVE_RAM: cannot open %s\n", g_battery_path);
+      LOGW("[DraStic] SAVE_RAM: cannot open %s", g_battery_path);
       return;
    }
    struct stat st;
@@ -318,13 +354,13 @@ static void save_ram_setup(const struct retro_game_info *game) {
    }
    if (want < 8) want = SAVE_RAM_SIZE;
    if (ftruncate(fd, (off_t)want) != 0) {
-      fprintf(stderr, "[DraStic-Trace] SAVE_RAM: ftruncate failed\n");
+      LOGW("[DraStic] SAVE_RAM: ftruncate failed");
       close(fd);
       return;
    }
    void *map = mmap(NULL, want, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
    if (map == MAP_FAILED) {
-      fprintf(stderr, "[DraStic-Trace] SAVE_RAM: mmap failed\n");
+      LOGW("[DraStic] SAVE_RAM: mmap failed");
       close(fd);
       return;
    }
@@ -340,13 +376,12 @@ static void save_ram_setup(const struct retro_game_info *game) {
    if (f) {
       size_t got = fread(g_save_ram, 1, g_save_ram_size, f);
       fclose(f);
-      fprintf(stderr, "[DraStic-Trace] SAVE_RAM: seeded %zu bytes from %s\n", got, sav);
+      LOGI("[DraStic] SAVE_RAM: seeded %zu bytes from %s", got, sav);
    } else {
       memset(g_save_ram, 0xff, g_save_ram_size);
    }
    close(fd);
-   fprintf(stderr, "[DraStic-Trace] SAVE_RAM: %zu bytes at %s\n", g_save_ram_size, g_battery_path);
-   fflush(stderr);
+   LOGI("[DraStic] SAVE_RAM: %zu bytes at %s", g_save_ram_size, g_battery_path);
 }
 
 bool retro_load_game(const struct retro_game_info *game) {
@@ -360,14 +395,10 @@ bool retro_load_game(const struct retro_game_info *game) {
    }
    save_ram_setup(game);
 
-   fprintf(stderr, "[DraStic-Trace] STEP 6: retro_load_game path=%s\n", game->path);
-   fflush(stderr);
-
    if (p_startGame) {
       snprintf(g_rom_path, sizeof(g_rom_path), "%s", game->path);
       g_game_loaded = true;
       pthread_create(&g_start_thread, NULL, startgame_thread, NULL);
-      pthread_detach(g_start_thread);
       return true;
    }
    return false;
@@ -382,6 +413,16 @@ bool retro_load_game_special(unsigned type, const struct retro_game_info *info, 
 
 void retro_unload_game(void) {
    g_game_loaded = false;
+   /* quitSystem is what unblocks the boot/emulation thread; join it so a
+    * following load_game starts from a quiet state and dlclose stays safe. */
+   if (g_initialized && p_quitSystem) {
+      JNIEnv *env = get_mock_jni_env();
+      p_quitSystem(env, NULL);
+   }
+   if (g_start_thread) {
+      pthread_join(g_start_thread, NULL);
+      g_start_thread = 0;
+   }
 }
 
 unsigned retro_get_region(void) { return RETRO_REGION_NTSC; }
@@ -408,18 +449,24 @@ static void state_temp_path(char *out, size_t outsz) {
 }
 
 bool retro_serialize(void *data, size_t size) {
-   if (!g_game_loaded || !g_drastic_audio_started || !p_saveState || !data) return false;
-   JNIEnv *env = get_mock_jni_env();
-   /* Blocking save (async=1); the core writes <savestates>/_savestate_temp.dss. */
-   p_saveState(env, NULL, SAVE_SLOT, JNI_TRUE);
+    if (!g_game_loaded || !g_drastic_audio_started || !p_saveState || !data) return false;
+    JNIEnv *env = get_mock_jni_env();
+    /* Blocking save (async=1); the core writes <savestates>/_savestate_temp.dss. */
+    p_saveState(env, NULL, SAVE_SLOT, JNI_TRUE);
 
-   char path[1100];
-   state_temp_path(path, sizeof(path));
-   FILE *f = fopen(path, "rb");
-   if (!f) return false;
-   size_t got = fread(data, 1, size, f);
-   fclose(f);
-   return got > 0;
+    char path[1100];
+    state_temp_path(path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0 || st.st_size <= 0 ||
+        (size_t)st.st_size > size) {
+        fclose(f);
+        return false;
+    }
+    size_t got = fread(data, 1, (size_t)st.st_size, f);
+    fclose(f);
+    return got == (size_t)st.st_size;
 }
 
 bool retro_unserialize(const void *data, size_t size) {
@@ -446,6 +493,12 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code) {
 void retro_run(void) {
    if (!g_game_loaded) return;
 
+   /* Apply option changes live (screen layout, touch mode). */
+   bool vars_changed = false;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &vars_changed) && vars_changed) {
+      update_variables();
+   }
+
    /* Do not touch the core until it has finished booting (first audio buffer);
     * getScreenBuffers/updateFrame race the boot thread and crash. */
    if (!g_drastic_audio_started) {
@@ -470,10 +523,6 @@ void retro_run(void) {
 
    static unsigned frame_count = 0;
    frame_count++;
-   if (frame_count <= 10 || frame_count % 300 == 0) {
-      fprintf(stderr, "[DraStic-Trace] retro_run frame #%u\n", frame_count);
-      fflush(stderr);
-   }
 
    input_poll_cb();
 

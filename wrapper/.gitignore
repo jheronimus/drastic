@@ -1,4 +1,4 @@
+frontend_smoke
 *.o
 *.so
 dist/
-.DS_Store
