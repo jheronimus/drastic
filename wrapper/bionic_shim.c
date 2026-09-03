@@ -146,6 +146,11 @@ void (*g_drastic_audio_batch)(const void *data, size_t frames) = NULL;
 
 /* Set on the first audio buffer: the core has finished booting. */
 int g_drastic_audio_started = 0;
+static volatile int s_shim_ff_active = 0;
+
+void bionic_set_fast_forward(int active) {
+    s_shim_ff_active = active;
+}
 
 static void bq_set_callback(void *cb, void *ctx) {
     pthread_mutex_lock(&g_bq_mutex);
@@ -200,8 +205,7 @@ static void *bq_worker(void *arg) {
         }
         /* The emulation thread is paced by the buffer-consumption callback.
          * Skip sleep during fast forward so the SPU advances at full speed. */
-        extern volatile int g_fast_forward_active;
-        if (!g_fast_forward_active) {
+        if (!s_shim_ff_active) {
             double sec = (double)size / (4.0 * 44100.0);
             struct timespec ts;
             ts.tv_sec = (time_t)sec;
@@ -363,7 +367,7 @@ static const struct SLOutputMixItf_ g_outmix_itf = {
     .RegisterDeviceChangeCallback = (void *)om_RegisterDeviceChangeCallback,
     .ReRoute = (void *)om_ReRoute,
 };
-static const struct SLOutputMixItf_ * const g_outmix_itf_ref = &g_outmix_itf;
+static const struct SLOutputMixItf_ * const g_outmix_itf_ref __attribute__((unused)) = &g_outmix_itf;
 
 static const struct SLObjectItf_ g_engine_obj = {
     .Realize = obj_Realize,

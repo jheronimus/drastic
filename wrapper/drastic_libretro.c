@@ -80,10 +80,17 @@ static fn_getRumbleState p_getRumbleState = NULL;
 
 static uint64_t build_drastic_config(void) {
    uint64_t value = 0;
-   value |= (uint64_t)(g_opt_frameskip & 0x1f);
-   value |= (uint64_t)(g_opt_frameskip_type & 0x7) << 5;
+   if (g_fast_forward_active) {
+      value |= (uint64_t)3;         /* frameskip = 3 */
+      value |= (uint64_t)1 << 5;    /* frameskip_type = 1 (Manual 3 frameskip) */
+      value |= (uint64_t)6 << 12;   /* fastforward_speed = 6 (0 us delay / Unlimited) */
+      value |= (UINT64_C(1) << 29); /* FastForwardEnabled = 1 */
+   } else {
+      value |= (uint64_t)(g_opt_frameskip & 0x1f);
+      value |= (uint64_t)(g_opt_frameskip_type & 0x7) << 5;
+      value |= (uint64_t)(g_opt_fastforward_speed & 0xf) << 12;
+   }
    value |= (uint64_t)2 << 8;    /* audio_latency = 2 (Medium) */
-   value |= (uint64_t)(g_opt_fastforward_speed & 0xf) << 12;
    value |= (uint64_t)(g_opt_cpu_threads & 0x7) << 16;
    value |= (uint64_t)(g_opt_autofire & 0x7) << 32;
    if (g_opt_mic) {
@@ -101,8 +108,6 @@ static uint64_t build_drastic_config(void) {
       value |= (UINT64_C(1) << 27); /* CheatsEnabled = 1 */
    if (g_opt_audio_filter)
       value |= (UINT64_C(1) << 24); /* SoundVolumeInterpolation = 1 */
-   if (g_fast_forward_active)
-      value |= (UINT64_C(1) << 29); /* FastForwardEnabled = 1 */
    if (!g_opt_edge_marking)
       value |= (UINT64_C(1) << 40); /* DisableEdgeMarking = 1 */
    if (g_opt_rtc)
@@ -271,9 +276,44 @@ static void audio_batch_wrap(const void *data, size_t frames) {
 }
 
 void retro_set_audio_sample(retro_audio_sample_t cb) { (void)cb; }
+
+static volatile int *g_p_minarch_ff = NULL;
+
+static void init_minarch_ff_pointer(void) {
+   if (!audio_batch_cb) return;
+   const uint32_t *code = (const uint32_t*)audio_batch_cb;
+   /* Match audio_sample_batch_callback instructions in minarch:
+    * +0x20: adrp x21, <page>
+    * +0x38: add  x0, x21, #0xc48 */
+   uint32_t w_adrp = code[8];   /* +0x20 */
+   uint32_t w_add  = code[14];  /* +0x38 */
+
+   if ((w_adrp & 0x9f000000) == 0x90000000 && (w_add & 0xffc00000) == 0x91000000) {
+      int32_t immlo = (w_adrp >> 29) & 3;
+      int32_t immhi = (w_adrp >> 5) & 0x7ffff;
+      int32_t imm = (immhi << 2) | immlo;
+      if (imm & (1 << 20)) imm -= (1 << 21);
+
+      uintptr_t pc = (uintptr_t)&code[8];
+      uintptr_t page = (pc & ~0xfffULL) + ((int64_t)imm << 12);
+      uint32_t imm12 = (w_add >> 10) & 0xfff;
+
+      /* fast_forward is at struct_base + 4 */
+      g_p_minarch_ff = (volatile int*)(page + imm12 + 4);
+      /* rewind_enable is at struct_base + 0x138: disable rewind snapshots */
+      volatile int *p_minarch_rewind = (volatile int*)(page + imm12 + 0x138);
+      *p_minarch_rewind = 0;
+      LOGI("[DraStic] Hooked minarch fast_forward at %p (val=%d), disabled rewind at %p\n",
+           (void*)g_p_minarch_ff, *g_p_minarch_ff, (void*)p_minarch_rewind);
+   } else {
+      LOGW("[DraStic] Could not resolve minarch fast_forward from audio_batch_cb\n");
+   }
+}
+
 void retro_set_audio_sample_batch(retro_audio_sample_batch_t cb) {
    audio_batch_cb = cb;
    g_drastic_audio_batch = (void (*)(const void *, size_t))audio_batch_wrap;
+   init_minarch_ff_pointer();
 }
 void retro_set_input_poll(retro_input_poll_t cb) { input_poll_cb = cb; }
 void retro_set_input_state(retro_input_state_t cb) { input_state_cb = cb; }
@@ -752,6 +792,11 @@ bool retro_serialize(void *data, size_t size) {
    if (!g_game_loaded || !g_drastic_audio_started || !p_saveState || !data) return false;
    if (size < sizeof(uint32_t)) return false;
 
+   /* If fast forward is active, skip serialization to avoid interrupting speed */
+   if (g_fast_forward_active) {
+      return false;
+   }
+
    /* Remove any existing temp state before triggering synchronous save */
    char path[1100];
    snprintf(path, sizeof(path), "%s/_savestate_temp.dss", g_savestates_dir);
@@ -984,30 +1029,24 @@ void retro_run(void) {
       }
    }
 
-   /* Fast Forward detection: check frontend shortcuts (SELECT + R1)
-    * or rapid frame pacing (elapsed frame delta < 8ms). */
-   bool r1_pressed = input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R);
-   bool sel_pressed = input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT);
-
-   struct timespec now_ts;
-   clock_gettime(CLOCK_MONOTONIC, &now_ts);
-   static struct timespec s_last_frame_ts = {0};
-   long frame_delta_us = 0;
-   if (s_last_frame_ts.tv_sec > 0) {
-      frame_delta_us = (now_ts.tv_sec - s_last_frame_ts.tv_sec) * 1000000 + (now_ts.tv_nsec - s_last_frame_ts.tv_nsec) / 1000;
-   }
-   s_last_frame_ts = now_ts;
-
+   /* Fast Forward detection: directly read minarch fast_forward state */
    int is_ff = 0;
-   if ((r1_pressed && sel_pressed) || (frame_delta_us > 0 && frame_delta_us < 8000)) {
-      is_ff = 1;
+   if (g_p_minarch_ff) {
+      is_ff = *g_p_minarch_ff ? 1 : 0;
+   } else {
+      bool r1_pressed = input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R);
+      bool sel_pressed = input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT);
+      if (r1_pressed && sel_pressed) is_ff = 1;
    }
 
    JNIEnv *env = get_mock_jni_env();
+   extern void bionic_set_fast_forward(int active);
    if (is_ff != g_fast_forward_active) {
       g_fast_forward_active = is_ff;
+      bionic_set_fast_forward(is_ff);
       if (p_applyConfig && g_game_loaded) {
          p_applyConfig(env, NULL, (jlong)build_drastic_config());
+         LOGI("[DraStic] Fast Forward live state -> %s\n", is_ff ? "ON" : "OFF");
       }
    }
 
@@ -1031,6 +1070,7 @@ void retro_run(void) {
    } else if (p_updateInput) {
       p_updateInput(env, NULL, (jint)keys, touchXY, touched ? JNI_TRUE : JNI_FALSE);
    }
+   (void)frame_info;
 
    bool video_ready = true;
 
@@ -1114,9 +1154,14 @@ void retro_run(void) {
       audio_frame_t drain_buf[735];
       size_t drained = 0;
       pthread_mutex_lock(&g_audio_ring_mutex);
-      while (g_audio_ring_read != g_audio_ring_write && drained < 735) {
-         drain_buf[drained++] = g_audio_ring[g_audio_ring_read];
-         g_audio_ring_read = (g_audio_ring_read + 1) % AUDIO_RING_FRAMES;
+      if (g_fast_forward_active) {
+         /* Flush audio ring during fast forward so it never backs up or blocks */
+         g_audio_ring_read = g_audio_ring_write;
+      } else {
+         while (g_audio_ring_read != g_audio_ring_write && drained < 735) {
+            drain_buf[drained++] = g_audio_ring[g_audio_ring_read];
+            g_audio_ring_read = (g_audio_ring_read + 1) % AUDIO_RING_FRAMES;
+         }
       }
       pthread_mutex_unlock(&g_audio_ring_mutex);
 

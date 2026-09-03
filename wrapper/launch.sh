@@ -19,6 +19,11 @@ SYSTEM_PATH="${SYSTEM_PATH:-/mnt/sdcard/.system/minime}"
 mkdir -p "$LOGS_PATH"
 mkdir -p "$BIOS_PATH/$EMU_TAG"
 mkdir -p "$SAVES_PATH/$EMU_TAG"
+CONFIG_DIR="$USERDATA_PATH/$EMU_TAG-$EMU_EXE"
+mkdir -p "$CONFIG_DIR"
+if [ ! -f "$CONFIG_DIR/minarch.cfg" ] && [ -f "$CORES_PATH/default.cfg" ]; then
+    cp "$CORES_PATH/default.cfg" "$CONFIG_DIR/minarch.cfg"
+fi
 HOME="$USERDATA_PATH"
 cd "$HOME" || exit 1
 [ -x /usr/share/minime/scripts/audio.sh ] && /usr/share/minime/scripts/audio.sh init >/dev/null 2>&1 || true
