@@ -9,33 +9,35 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <limits.h>
+#include <fcntl.h>
+#include <linux/input.h>
 
 #define DRASTIC_LIB_NAME "libdrastic_arm64.so"
 
-/* DS Keymap constants */
-#define NDS_KEY_A      (1 << 0)
-#define NDS_KEY_B      (1 << 1)
-#define NDS_KEY_SELECT (1 << 2)
-#define NDS_KEY_START  (1 << 3)
-#define NDS_KEY_RIGHT  (1 << 4)
-#define NDS_KEY_LEFT   (1 << 5)
-#define NDS_KEY_UP     (1 << 6)
-#define NDS_KEY_DOWN   (1 << 7)
-#define NDS_KEY_R      (1 << 8)
-#define NDS_KEY_L      (1 << 9)
-#define NDS_KEY_X      (1 << 10)
-#define NDS_KEY_Y      (1 << 11)
+/* DraStic JNI Button Bitmask Order */
+#define NDS_KEY_UP     (1 << 0)
+#define NDS_KEY_DOWN   (1 << 1)
+#define NDS_KEY_LEFT   (1 << 2)
+#define NDS_KEY_RIGHT  (1 << 3)
+#define NDS_KEY_A      (1 << 4)
+#define NDS_KEY_B      (1 << 5)
+#define NDS_KEY_X      (1 << 6)
+#define NDS_KEY_Y      (1 << 7)
+#define NDS_KEY_L      (1 << 8)
+#define NDS_KEY_R      (1 << 9)
+#define NDS_KEY_START  (1 << 10)
+#define NDS_KEY_SELECT (1 << 11)
 
 /* Screen Layout Modes */
 enum layout_mode {
-   LAYOUT_VERTICAL = 0,
-   LAYOUT_SINGLE,
+   LAYOUT_SINGLE = 0,
+   LAYOUT_VERTICAL,
    LAYOUT_HORIZONTAL
 };
 
 enum touch_mode {
-   TOUCH_MODE_ANALOG = 0,
-   TOUCH_MODE_TOUCHSCREEN
+   TOUCH_MODE_TOUCHSCREEN = 0,
+   TOUCH_MODE_ANALOG
 };
 
 static retro_environment_t environ_cb;
@@ -48,13 +50,39 @@ static void *g_drastic_handle = NULL;
 static fn_JNI_OnLoad p_JNI_OnLoad = NULL;
 static fn_onInit p_onInit = NULL;
 static fn_startGame p_startGame = NULL;
+static fn_applyConfig p_applyConfig = NULL;
 static fn_updateFrame p_updateFrame = NULL;
+
+static uint64_t build_drastic_config(void) {
+   uint64_t value = 0;
+   value |= (uint64_t)0;         /* frameskip = 0 */
+   value |= (uint64_t)0 << 5;    /* frameskip_type = 0 (manual) */
+   value |= (uint64_t)2 << 8;    /* audio_latency = 2 */
+   value |= (uint64_t)2 << 12;   /* fast_forward = 2 */
+   value |= (uint64_t)3 << 16;   /* cpu_threads = 3 (multi-threaded JIT) */
+   value |= (uint64_t)2 << 32;   /* autofire = 2 */
+   value |= (uint64_t)1 << 37;   /* mic_level = 1 */
+   value |= (uint64_t)1 << 43;   /* slot2 = 1 */
+
+   value |= (UINT64_C(1) << 31); /* SoundEnabled = 1 */
+   value |= (UINT64_C(1) << 28); /* Threaded3D = 1 */
+   value |= (UINT64_C(1) << 27); /* CheatsEnabled = 1 */
+   value |= (UINT64_C(1) << 26); /* MicEnabled = 1 */
+   value |= (UINT64_C(1) << 25); /* BackupInSavestates = 1 */
+   value |= (UINT64_C(1) << 23); /* Use16BitColor = 1 */
+   value |= (UINT64_C(1) << 39); /* RtcSystemTime = 1 */
+   value |= (UINT64_C(1) << 42); /* LuaEnabled = 1 */
+   value |= (UINT64_C(1) << 48); /* PreloadRoms = 1 */
+   return value;
+}
 static fn_getScreenBuffers p_getScreenBuffers = NULL;
+static fn_getSnapshots16 p_getSnapshots16 = NULL;
 static fn_renderFrame p_renderFrame = NULL;
 static fn_updateInput p_updateInput = NULL;
 static fn_saveState p_saveState = NULL;
 static fn_loadState p_loadState = NULL;
 static fn_setAutosaveInterval p_setAutosaveInterval = NULL;
+static fn_setAudioVolume p_setAudioVolume = NULL;
 static fn_resetDS p_resetDS = NULL;
 static fn_quitSystem p_quitSystem = NULL;
 static fn_signalScreen p_signalScreen = NULL;
@@ -62,7 +90,8 @@ static fn_waitScreen p_waitScreen = NULL;
 
 static bool g_initialized = false;
 static bool g_game_loaded = false;
-static struct timespec g_audio_started_at;
+static bool g_running = false;
+extern int g_drastic_audio_started;
 static pthread_t g_start_thread;
 static char g_rom_path[PATH_MAX];
 
@@ -73,6 +102,47 @@ static uint16_t g_output_buffer[512 * 384];
 static jintArray g_jni_screen_top = NULL;
 static jintArray g_jni_screen_bottom = NULL;
 
+typedef struct {
+   int16_t l;
+   int16_t r;
+} audio_frame_t;
+
+#define AUDIO_RING_FRAMES 16384
+static audio_frame_t g_audio_ring[AUDIO_RING_FRAMES];
+static size_t g_audio_ring_read = 0;
+static size_t g_audio_ring_write = 0;
+static pthread_mutex_t g_audio_ring_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static int g_ts_fd = -1;
+static int g_ts_raw_x = 0;
+static int g_ts_raw_y = 0;
+static bool g_ts_down = false;
+
+static void ts_poll_events(void) {
+   if (g_ts_fd < 0) {
+      g_ts_fd = open("/dev/input/event1", O_RDONLY | O_NONBLOCK);
+      if (g_ts_fd < 0) return;
+   }
+   struct input_event ev[32];
+   ssize_t rd;
+   while ((rd = read(g_ts_fd, ev, sizeof(ev))) > 0) {
+      size_t count = rd / sizeof(struct input_event);
+      for (size_t i = 0; i < count; i++) {
+         if (ev[i].type == EV_ABS) {
+            if (ev[i].code == ABS_MT_POSITION_X || ev[i].code == ABS_X) {
+               g_ts_raw_x = ev[i].value;
+            } else if (ev[i].code == ABS_MT_POSITION_Y || ev[i].code == ABS_Y) {
+               g_ts_raw_y = ev[i].value;
+            }
+         } else if (ev[i].type == EV_KEY) {
+            if (ev[i].code == BTN_TOUCH) {
+               g_ts_down = (ev[i].value != 0);
+            }
+         }
+      }
+   }
+}
+
 /* SAVE RAM: a memfd-backed file that doubles as the core's battery save
  * (User/backup/dseins.dsv). The core reads/writes it via its own fd; minarch
  * reads/writes the same pages via retro_get_memory_data. */
@@ -82,15 +152,16 @@ static size_t g_save_ram_size = 0;
 static char g_battery_path[1024];
 static char g_savestates_dir[1024];
 
-static enum layout_mode g_layout_mode = LAYOUT_VERTICAL;
+static enum layout_mode g_layout_mode = LAYOUT_SINGLE;
 static enum touch_mode g_touch_mode = TOUCH_MODE_TOUCHSCREEN;
-static bool g_active_screen = false; /* false = top, true = bottom */
+static bool g_active_screen = true; /* true = bottom (interactive/menus), false = top */
 
 /* Frontend-provided logger; falls back to stderr. */
 static retro_log_printf_t g_log = NULL;
 
 #define LOGI(...) do { if (g_log) g_log(RETRO_LOG_INFO, __VA_ARGS__); else fprintf(stderr, __VA_ARGS__); } while (0)
 #define LOGW(...) do { if (g_log) g_log(RETRO_LOG_WARN, __VA_ARGS__); else fprintf(stderr, __VA_ARGS__); } while (0)
+#define LOGE(...) do { if (g_log) g_log(RETRO_LOG_ERROR, __VA_ARGS__); else fprintf(stderr, __VA_ARGS__); } while (0)
 
 static int g_cursor_x = 128;
 static int g_cursor_y = 96;
@@ -103,7 +174,7 @@ void retro_set_environment(retro_environment_t cb) {
    environ_cb = cb;
 
    static const struct retro_variable vars[] = {
-      { "drastic_screen_layout", "Screen Layout; Vertical (256x384)|Single Screen|Side by Side (512x192)" },
+      { "drastic_screen_layout", "Screen Layout; Single Screen|Vertical (256x384)|Side by Side (512x192)" },
       { "drastic_touch_mode", "Touch Mode; Physical Touchscreen|Analog Cursor" },
       { NULL, NULL }
    };
@@ -127,9 +198,16 @@ void retro_set_environment(retro_environment_t cb) {
 
 void retro_set_video_refresh(retro_video_refresh_t cb) { video_cb = cb; }
 static void audio_batch_wrap(const void *data, size_t frames) {
-   if (audio_batch_cb) {
-      audio_batch_cb((const int16_t*)data, frames);
+   if (!data || frames == 0) return;
+   pthread_mutex_lock(&g_audio_ring_mutex);
+   const audio_frame_t *src = (const audio_frame_t*)data;
+   for (size_t i = 0; i < frames; i++) {
+      size_t next = (g_audio_ring_write + 1) % AUDIO_RING_FRAMES;
+      if (next == g_audio_ring_read) break; /* ring full */
+      g_audio_ring[g_audio_ring_write] = src[i];
+      g_audio_ring_write = next;
    }
+   pthread_mutex_unlock(&g_audio_ring_mutex);
 }
 
 void retro_set_audio_sample(retro_audio_sample_t cb) { (void)cb; }
@@ -217,13 +295,16 @@ void retro_init(void) {
    p_JNI_OnLoad = (fn_JNI_OnLoad)dlsym(g_drastic_handle, "JNI_OnLoad");
    p_onInit = (fn_onInit)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_onInit");
    p_startGame = (fn_startGame)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_startGame");
+   p_applyConfig = (fn_applyConfig)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_applyConfig");
    p_updateFrame = (fn_updateFrame)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_updateFrame");
    p_getScreenBuffers = (fn_getScreenBuffers)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_getScreenBuffers");
+   p_getSnapshots16 = (fn_getSnapshots16)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_getSnapshots16");
    p_renderFrame = (fn_renderFrame)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_renderFrame");
    p_updateInput = (fn_updateInput)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_updateInput");
    p_saveState = (fn_saveState)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_saveState");
    p_loadState = (fn_loadState)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_loadState");
    p_setAutosaveInterval = (fn_setAutosaveInterval)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_setAutosaveInterval");
+   p_setAudioVolume = (fn_setAudioVolume)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_setAudioVolume");
    p_resetDS = (fn_resetDS)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_resetDS");
    p_quitSystem = (fn_quitSystem)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_quitSystem");
    p_signalScreen = (fn_signalScreen)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_signalScreen");
@@ -237,13 +318,19 @@ void retro_init(void) {
    if (p_onInit && env) {
       jstring path = (*env)->NewStringUTF(env, g_system_dir);
       jstring savePath = (*env)->NewStringUTF(env, g_save_dir);
-      p_onInit(env, NULL, path, savePath);
+      LOGI("[DraStic] calling onInit: sys=%s save=%s\n", g_system_dir, g_save_dir);
+      p_onInit(env, NULL, path, savePath, 28);
+      LOGI("[DraStic] onInit finished\n");
    }
    g_jni_screen_top = (*env)->NewIntArray(env, NDS_SCREEN_W * NDS_SCREEN_H);
    g_jni_screen_bottom = (*env)->NewIntArray(env, NDS_SCREEN_W * NDS_SCREEN_H);
 
    if (p_setAutosaveInterval) {
       p_setAutosaveInterval(env, NULL, 30);
+   }
+   if (p_setAudioVolume) {
+      p_setAudioVolume(env, NULL, 100);
+      LOGI("[DraStic] setAudioVolume(100) called\n");
    }
 
    g_initialized = true;}
@@ -319,7 +406,15 @@ static void *startgame_thread(void *arg) {
    (void)arg;
    JNIEnv *env = get_mock_jni_env();
    jstring rom = (*env)->NewStringUTF(env, g_rom_path);
-   int result = p_startGame(env, NULL, rom);
+   uint64_t config = build_drastic_config();
+   int result = p_startGame(env, NULL, rom, -1, (jlong)config, 0, JNI_FALSE, 0);
+   LOGI("[DraStic] startGame returned %d for %s (config=0x%llx)\n", result, g_rom_path, (unsigned long long)config);
+   if (p_applyConfig) {
+      p_applyConfig(env, NULL, (jlong)config);
+   }
+   if (p_setAudioVolume) {
+      p_setAudioVolume(env, NULL, 100);
+   }
    if (!result) {
       LOGW("[DraStic] startGame failed for %s", g_rom_path);
       g_game_loaded = false;
@@ -384,9 +479,12 @@ static void save_ram_setup(const struct retro_game_info *game) {
    LOGI("[DraStic] SAVE_RAM: %zu bytes at %s", g_save_ram_size, g_battery_path);
 }
 
+static char g_start_stack[1024 * 1024] __attribute__((aligned(4096)));
+
 bool retro_load_game(const struct retro_game_info *game) {
    if (!game || !game->path) return false;
    update_variables();
+   g_active_screen = false;
 
    if (g_save_ram) {
       munmap(g_save_ram, g_save_ram_size);
@@ -398,8 +496,20 @@ bool retro_load_game(const struct retro_game_info *game) {
    if (p_startGame) {
       snprintf(g_rom_path, sizeof(g_rom_path), "%s", game->path);
       g_game_loaded = true;
-      pthread_create(&g_start_thread, NULL, startgame_thread, NULL);
-      return true;
+      pthread_attr_t attr;
+      pthread_attr_init(&attr);
+      pthread_attr_setstack(&attr, g_start_stack, sizeof(g_start_stack));
+      pthread_create(&g_start_thread, &attr, startgame_thread, NULL);
+      pthread_attr_destroy(&attr);
+
+      /* Wait for startGame to finish all memory mappings and BIOS loading */
+      int wait_ms = 0;
+      while (!g_drastic_audio_started && g_game_loaded && wait_ms < 3000) {
+         usleep(10000);
+         wait_ms += 10;
+      }
+      LOGI("[DraStic] startGame ready after %d ms\n", wait_ms);
+      return g_game_loaded;
    }
    return false;
 }
@@ -413,6 +523,7 @@ bool retro_load_game_special(unsigned type, const struct retro_game_info *info, 
 
 void retro_unload_game(void) {
    g_game_loaded = false;
+   g_running = false;
    /* quitSystem is what unblocks the boot/emulation thread; join it so a
     * following load_game starts from a quiet state and dlclose stays safe. */
    if (g_initialized && p_quitSystem) {
@@ -439,9 +550,9 @@ size_t retro_get_memory_size(unsigned id) {
 #define SAVE_SLOT 0
 
 size_t retro_serialize_size(void) {
-   /* DraStic .dss savestates are zlib-compressed and game-size dependent;
-    * report a generous fixed cap. */
-   return 8 * 1024 * 1024;
+   /* DraStic savestates are slow zlib-compressed files; return 0 so the frontend
+    * does not enable real-time per-frame rewind buffer capture. */
+   return 0;
 }
 
 static void state_temp_path(char *out, size_t outsz) {
@@ -492,6 +603,7 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code) {
 
 void retro_run(void) {
    if (!g_game_loaded) return;
+   g_running = true;
 
    /* Apply option changes live (screen layout, touch mode). */
    bool vars_changed = false;
@@ -499,23 +611,15 @@ void retro_run(void) {
       update_variables();
    }
 
-   /* Do not touch the core until it has finished booting (first audio buffer);
-    * getScreenBuffers/updateFrame race the boot thread and crash. */
-   if (!g_drastic_audio_started) {
-      video_cb(NULL, 0, 0, 0);
-      return;
-   }
-
-   /* The boot's renderer setup (3D renderer + DLDI phase) continues for a few
-    * hundred ms after the first audio buffer; touching getScreenBuffers or
-    * signalScreen during it races the boot and crashes the renderer CRC. */
-   if (g_audio_started_at.tv_sec == 0) {
-      clock_gettime(CLOCK_MONOTONIC, &g_audio_started_at);
+   /* Allow 600ms for background startgame_thread to finish ROM & DLDI setup */
+   static struct timespec s_start_time = {0};
+   if (s_start_time.tv_sec == 0) {
+      clock_gettime(CLOCK_MONOTONIC, &s_start_time);
    }
    struct timespec now;
    clock_gettime(CLOCK_MONOTONIC, &now);
-   long elapsed_ms = (now.tv_sec - g_audio_started_at.tv_sec) * 1000 +
-                     (now.tv_nsec - g_audio_started_at.tv_nsec) / 1000000;
+   long elapsed_ms = (now.tv_sec - s_start_time.tv_sec) * 1000 +
+                     (now.tv_nsec - s_start_time.tv_nsec) / 1000000;
    if (elapsed_ms < 600) {
       video_cb(NULL, 0, 0, 0);
       return;
@@ -523,6 +627,9 @@ void retro_run(void) {
 
    static unsigned frame_count = 0;
    frame_count++;
+   if ((frame_count % 60) == 0) {
+      LOGI("[DraStic] frame=%u (elapsed=%ld ms)\n", frame_count, elapsed_ms);
+   }
 
    input_poll_cb();
 
@@ -540,11 +647,18 @@ void retro_run(void) {
    if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START))  keys |= NDS_KEY_START;
    if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT)) keys |= NDS_KEY_SELECT;
 
+   static uint32_t prev_keys = 0;
+   if (keys != prev_keys) {
+      LOGI("[DraStic-Key] keys: 0x%04x (prev 0x%04x)\n", keys, prev_keys);
+      prev_keys = keys;
+   }
+
    /* Screen Swap Toggle (L2) */
    static bool l2_pressed = false;
    if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2)) {
       if (!l2_pressed) {
          g_active_screen = !g_active_screen;
+         LOGI("[DraStic-Screen] swapped screen to: %s\n", g_active_screen ? "BOTTOM" : "TOP");
          l2_pressed = true;
       }
    } else {
@@ -555,22 +669,80 @@ void retro_run(void) {
    int touch_x = 0, touch_y = 0;
    bool touched = false;
 
-   if (g_touch_mode == TOUCH_MODE_ANALOG) {
-      int16_t rx = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X);
-      int16_t ry = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y);
-      if (abs(rx) > 4000) g_cursor_x += rx / 4000;
-      if (abs(ry) > 4000) g_cursor_y += ry / 4000;
+   /* Physical Touchscreen (Goodix capacitive touch on RG Arc D) */
+   ts_poll_events();
+   if (g_ts_down) {
+      /* RG ARC-D panel: 480x640 portrait rotated 90 deg clockwise.
+       * raw_x in 0..479, raw_y in 0..639.
+       * Landscape screen X = raw_y (0..639).
+       * Landscape screen Y = 479 - raw_x (0..479). */
+      int disp_x = g_ts_raw_y;
+      int disp_y = 479 - g_ts_raw_x;
+      if (disp_x < 0) disp_x = 0;
+      if (disp_x > 639) disp_x = 639;
+      if (disp_y < 0) disp_y = 0;
+      if (disp_y > 479) disp_y = 479;
+
+      if (g_layout_mode == LAYOUT_SINGLE) {
+         if (g_active_screen) {
+            touch_x = (disp_x * NDS_SCREEN_W) / 640;
+            touch_y = (disp_y * NDS_SCREEN_H) / 480;
+            touched = true;
+         }
+      } else if (g_layout_mode == LAYOUT_VERTICAL) {
+         if (disp_y >= 240) {
+            touch_x = (disp_x * NDS_SCREEN_W) / 640;
+            touch_y = ((disp_y - 240) * NDS_SCREEN_H) / 240;
+            touched = true;
+         }
+      }
+   } else if (input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_PRESSED)) {
+      int16_t px = input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_X);
+      int16_t py = input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_Y);
+
+      if (g_layout_mode == LAYOUT_SINGLE && g_active_screen) {
+         int tx = (int)(((int32_t)(px + 0x7fff) * NDS_SCREEN_W) / 0xffff);
+         int ty = (int)(((int32_t)(py + 0x7fff) * NDS_SCREEN_H) / 0xffff);
+         if (tx < 0) tx = 0;
+         if (tx >= NDS_SCREEN_W) tx = NDS_SCREEN_W - 1;
+         if (ty < 0) ty = 0;
+         if (ty >= NDS_SCREEN_H) ty = NDS_SCREEN_H - 1;
+         touch_x = tx;
+         touch_y = ty;
+         touched = true;
+      } else if (g_layout_mode == LAYOUT_VERTICAL) {
+         int tx = (int)(((int32_t)(px + 0x7fff) * NDS_SCREEN_W) / 0xffff);
+         int ty = (int)(((int32_t)(py + 0x7fff) * (NDS_SCREEN_H * 2)) / 0xffff);
+         if (tx < 0) tx = 0;
+         if (tx >= NDS_SCREEN_W) tx = NDS_SCREEN_W - 1;
+         if (ty >= NDS_SCREEN_H) {
+            touch_x = tx;
+            touch_y = ty - NDS_SCREEN_H;
+            if (touch_y >= NDS_SCREEN_H) touch_y = NDS_SCREEN_H - 1;
+            touched = true;
+         }
+      }
    }
 
-   if (g_cursor_x < 0) g_cursor_x = 0;
-   if (g_cursor_x > 255) g_cursor_x = 255;
-   if (g_cursor_y < 0) g_cursor_y = 0;
-   if (g_cursor_y > 191) g_cursor_y = 191;
+   /* Fallback: Analog Cursor & R2 Tap */
+   if (!touched) {
+      if (g_touch_mode == TOUCH_MODE_ANALOG) {
+         int16_t rx = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X);
+         int16_t ry = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y);
+         if (abs(rx) > 4000) g_cursor_x += rx / 4000;
+         if (abs(ry) > 4000) g_cursor_y += ry / 4000;
+      }
 
-   if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2)) {
-      touched = true;
-      touch_x = g_cursor_x;
-      touch_y = g_cursor_y;
+      if (g_cursor_x < 0) g_cursor_x = 0;
+      if (g_cursor_x > 255) g_cursor_x = 255;
+      if (g_cursor_y < 0) g_cursor_y = 0;
+      if (g_cursor_y > 191) g_cursor_y = 191;
+
+      if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2)) {
+         touched = true;
+         touch_x = g_cursor_x;
+         touch_y = g_cursor_y;
+      }
    }
 
    JNIEnv *env = get_mock_jni_env();
@@ -586,33 +758,50 @@ void retro_run(void) {
 
    bool video_ready = true;
 
-   /* Copy both 256x192 ARGB8888 screens via getScreenBuffers, convert to
-    * RGB565 for minarch. */
-   if (video_ready && p_getScreenBuffers && g_jni_screen_top && g_jni_screen_bottom) {
-      /* Signal first: it releases the emulation's backpressure, which flips
-       * the render double-buffer so the freshly rendered frame becomes current.
-       * Then copy it out. */
-      if (p_signalScreen) {
-         p_signalScreen(env, NULL);
-      }
+   /* Wait for emulation to produce the next frame */
+   if (p_waitScreen) {
+      p_waitScreen(env, NULL);
+   }
+
+   /* Fetch screen buffers */
+   if (p_getScreenBuffers && g_jni_screen_top && g_jni_screen_bottom) {
       p_getScreenBuffers(env, NULL, g_jni_screen_top, g_jni_screen_bottom);
 
       jint *top = (jint*)(*env)->GetPrimitiveArrayCritical(env, g_jni_screen_top, NULL);
       jint *bot = (jint*)(*env)->GetPrimitiveArrayCritical(env, g_jni_screen_bottom, NULL);
       if (top && bot) {
+         int nb_top = 0, nb_bot = 0;
+         uint32_t s_top = 0, s_bot = 0;
          uint16_t *dst = g_raw_screen_buffer;
          for (int i = 0; i < NDS_SCREEN_W * NDS_SCREEN_H; i++) {
             uint32_t px = (uint32_t)top[i];
+            if ((px & 0x00ffffff) != 0) {
+               nb_top++;
+               if (!s_top) s_top = px;
+            }
             dst[i] = (uint16_t)(((px >> 8) & 0xf800) | ((px >> 5) & 0x07e0) | ((px >> 3) & 0x001f));
          }
          dst = g_raw_screen_buffer + NDS_SCREEN_W * NDS_SCREEN_H;
          for (int i = 0; i < NDS_SCREEN_W * NDS_SCREEN_H; i++) {
             uint32_t px = (uint32_t)bot[i];
+            if ((px & 0x00ffffff) != 0) {
+               nb_bot++;
+               if (!s_bot) s_bot = px;
+            }
             dst[i] = (uint16_t)(((px >> 8) & 0xf800) | ((px >> 5) & 0x07e0) | ((px >> 3) & 0x001f));
+         }
+         if ((frame_count % 60) == 0) {
+            LOGI("[DraStic] f=%u nb_top=%d nb_bot=%d s_top=0x%08x s_bot=0x%08x act=%d\n",
+                 frame_count, nb_top, nb_bot, s_top, s_bot, (int)g_active_screen);
          }
       }
       (*env)->ReleasePrimitiveArrayCritical(env, g_jni_screen_bottom, bot, JNI_ABORT);
       (*env)->ReleasePrimitiveArrayCritical(env, g_jni_screen_top, top, JNI_ABORT);
+   }
+
+   /* Signal emulation thread that frame was consumed */
+   if (p_signalScreen) {
+      p_signalScreen(env, NULL);
    }
 
    /* Render Output Framebuffer according to g_layout_mode */
@@ -642,5 +831,33 @@ void retro_run(void) {
    } else {
       /* Frontend supports dupe (GET_CAN_DUPE); push nothing while booting. */
       video_cb(NULL, 0, 0, 0);
+   }
+
+   /* Synchronously drain audio ring buffer and feed frontend on main thread */
+   if (audio_batch_cb && g_running) {
+      audio_frame_t drain_buf[735];
+      size_t drained = 0;
+      pthread_mutex_lock(&g_audio_ring_mutex);
+      while (g_audio_ring_read != g_audio_ring_write && drained < 735) {
+         drain_buf[drained++] = g_audio_ring[g_audio_ring_read];
+         g_audio_ring_read = (g_audio_ring_read + 1) % AUDIO_RING_FRAMES;
+      }
+      pthread_mutex_unlock(&g_audio_ring_mutex);
+
+      if (drained > 0) {
+         static int s_audio_report = 0;
+         if (++s_audio_report % 60 == 0) {
+            int nz = 0;
+            int16_t pk = 0;
+            const int16_t *s16 = (const int16_t*)drain_buf;
+            for (size_t s = 0; s < drained * 2; s++) {
+               if (s16[s] != 0) nz++;
+               int16_t v = abs(s16[s]);
+               if (v > pk) pk = v;
+            }
+            LOGI("[DraStic-Audio] drained=%zu non_zero=%d peak=%d\n", drained, nz, (int)pk);
+         }
+         audio_batch_cb((const int16_t*)drain_buf, drained);
+      }
    }
 }

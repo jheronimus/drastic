@@ -10,66 +10,6 @@
 #include <time.h>
 #include <errno.h>
 
-int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
-    (void)prio;
-    va_list ap;
-    fprintf(stderr, "[DraStic-Log:%s] ", tag ? tag : "Core");
-    va_start(ap, fmt);
-    int ret = vfprintf(stderr, fmt, ap);
-    va_end(ap);
-    fprintf(stderr, "\n");
-    fflush(stderr);
-    return ret;
-}
-
-int __android_log_vprint(int prio, const char *tag, const char *fmt, va_list ap) {
-    (void)prio;
-    fprintf(stderr, "[DraStic-Log:%s] ", tag ? tag : "Core");
-    int ret = vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\n");
-    fflush(stderr);
-    return ret;
-}
-
-int __android_log_write(int prio, const char *tag, const char *text) {
-    (void)prio;
-    int ret = fprintf(stderr, "[DraStic-Log:%s] %s\n", tag ? tag : "Core", text ? text : "");
-    fflush(stderr);
-    return ret;
-}
-
-void __android_log_assert(const char *cond, const char *tag, const char *fmt, ...) {
-    va_list ap;
-    fprintf(stderr, "[DraStic-ASSERT:%s] %s: ", tag ? tag : "Core", cond ? cond : "");
-    if (fmt) {
-        va_start(ap, fmt);
-        vfprintf(stderr, fmt, ap);
-        va_end(ap);
-    }
-    fprintf(stderr, "\n");
-    fflush(stderr);
-    abort();
-}
-
-void android_set_abort_message(const char *msg) {
-    fprintf(stderr, "[DraStic-ABORT] %s\n", msg ? msg : "");
-    fflush(stderr);
-}
-
-alignas(8) char __sF[768];
-
-__attribute__((constructor))
-static void init_bionic_shim(void) {
-    FILE **ptrs = (FILE**)__sF;
-    ptrs[0] = stdin;
-    ptrs[1] = stdout;
-    ptrs[2] = stderr;
-}
-
-int *__errno(void) {
-    return &errno;
-}
-
 typedef int32_t SLresult;
 typedef uint32_t SLuint32;
 typedef uint16_t SLuint16;
@@ -258,7 +198,6 @@ static void *bq_worker(void *arg) {
         if (audio) {
             audio(buf, size / 4);
         }
-
         /* The emulation thread is paced by the buffer-consumption callback. */
         double sec = (double)size / (4.0 * 44100.0);
         struct timespec ts;
@@ -320,14 +259,23 @@ static SLresult bq_RegisterCallback(SLBufferQueueItf self, void *cb, void *ctx) 
 
 static SLresult absq_Enqueue(SLAndroidSimpleBufferQueueItf self, const void *pBuffer, SLuint32 size) {
     (void)self;
-    (void)pBuffer;
-    fprintf(stderr, "[DraStic-OpenSLES] absq_Enqueue size=%u (audio dropped)\n", size);
-    fflush(stderr);
+    if (!g_drastic_audio_started) {
+        g_drastic_audio_started = 1;
+        fprintf(stderr, "[DraStic-OpenSLES] audio started (absq)\n");
+        fflush(stderr);
+    }
+    bq_push_played(pBuffer, size);
     return SL_RESULT_SUCCESS;
 }
-static SLresult absq_Clear(SLAndroidSimpleBufferQueueItf self) { (void)self; return SL_RESULT_SUCCESS; }
+static SLresult absq_Clear(SLAndroidSimpleBufferQueueItf self) { (void)self; bq_clear_played(); return SL_RESULT_SUCCESS; }
 static SLresult absq_GetState(SLAndroidSimpleBufferQueueItf self, SLAndroidSimpleBufferQueueState *pState) { (void)self; if (pState) { pState->count = 0; pState->index = 0; } return SL_RESULT_SUCCESS; }
-static SLresult absq_RegisterCallback(SLAndroidSimpleBufferQueueItf self, void *cb, void *ctx) { (void)self; (void)cb; (void)ctx; return SL_RESULT_SUCCESS; }
+static SLresult absq_RegisterCallback(SLAndroidSimpleBufferQueueItf self, void *cb, void *ctx) {
+    (void)self;
+    fprintf(stderr, "[DraStic-OpenSLES] absq_RegisterCallback cb=%p ctx=%p\n", cb, ctx);
+    fflush(stderr);
+    bq_set_callback(cb, ctx);
+    return SL_RESULT_SUCCESS;
+}
 
 static SLresult vol_SetVolumeLevel(SLVolumeItf self, SLmillibel mbs) { (void)self; (void)mbs; return SL_RESULT_SUCCESS; }
 static SLresult vol_GetVolumeLevel(SLVolumeItf self, SLmillibel *pMbs) { (void)self; if (pMbs) *pMbs = 0; return SL_RESULT_SUCCESS; }
@@ -668,53 +616,6 @@ ssize_t __recvfrom_chk(int fd, void *buf, size_t len, size_t buf_len, int flags,
     return recvfrom(fd, buf, len, flags, (struct sockaddr*)src_addr, (socklen_t*)addrlen);
 }
 
-#include <sys/mman.h>
-#include <dlfcn.h>
-
-int mprotect(void *addr, size_t len, int prot) {
-    typedef int (*pfn_mprotect)(void *, size_t, int);
-    static pfn_mprotect real_mprotect = NULL;
-    if (!real_mprotect) {
-        real_mprotect = (pfn_mprotect)dlsym(RTLD_NEXT, "mprotect");
-    }
-    int res = real_mprotect ? real_mprotect(addr, len, prot) : 0;
-    fprintf(stderr, "[Bionic-Shim] mprotect(%p, %zu, 0x%x) -> %d\n", addr, len, prot, res);
-    fflush(stderr);
-    if (res != 0) {
-        fprintf(stderr, "[Bionic-Shim] WARNING: real mprotect failed (errno=%d), returning success stub for DraStic JIT\n", errno);
-        fflush(stderr);
-        return 0;
-    }
-    return res;
-}
-
 mode_t __umask_chk(mode_t mask) {
     return umask(mask);
-}
-
-#include <setjmp.h>
-#include <getopt.h>
-
-int _setjmp(jmp_buf env) {
-    return setjmp(env);
-}
-
-void _longjmp(jmp_buf env, int val) {
-    longjmp(env, val);
-}
-
-void *memmem(const void *haystack, size_t haystack_len, const void *needle, size_t needle_len) {
-    const char *h = (const char *)haystack;
-    const char *n = (const char *)needle;
-    if (needle_len == 0) return (void *)h;
-    if (needle_len > haystack_len) return NULL;
-    for (size_t i = 0; i + needle_len <= haystack_len; i++) {
-        if (h[i] == n[0] && memcmp(h + i, n, needle_len) == 0) return (void *)(h + i);
-    }
-    return NULL;
-}
-
-int getopt_long(int argc, char * const argv[], const char *optstring, const struct option *longopts, int *longindex) {
-    (void)argc; (void)argv; (void)optstring; (void)longopts; (void)longindex;
-    return -1;
 }

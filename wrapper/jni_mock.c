@@ -143,6 +143,12 @@ static jshort* JNICALL mock_GetShortArrayElements(JNIEnv *env, jshortArray array
     return (jshort*)array;
 }
 
+static jint* JNICALL mock_GetIntArrayElements(JNIEnv *env, jintArray array, jboolean *isCopy) {
+    (void)env;
+    if (isCopy) *isCopy = JNI_FALSE;
+    return (jint*)array;
+}
+
 static void* JNICALL mock_GetPrimitiveArrayCritical(JNIEnv *env, jarray array, jboolean *isCopy) {
     (void)env;
     if (isCopy) *isCopy = JNI_FALSE;
@@ -161,6 +167,27 @@ static void JNICALL mock_ReleaseShortArrayElements(JNIEnv *env, jshortArray arra
     (void)array;
     (void)elems;
     (void)mode;
+}
+
+static void JNICALL mock_ReleaseIntArrayElements(JNIEnv *env, jintArray array, jint *elems, jint mode) {
+    (void)env;
+    (void)array;
+    (void)elems;
+    (void)mode;
+}
+
+static void JNICALL mock_GetIntArrayRegion(JNIEnv *env, jintArray array, jsize start, jsize len, jint *buf) {
+    (void)env;
+    if (array && buf && len > 0) {
+        memcpy(buf, (jint*)array + start, len * sizeof(jint));
+    }
+}
+
+static void JNICALL mock_SetIntArrayRegion(JNIEnv *env, jintArray array, jsize start, jsize len, const jint *buf) {
+    (void)env;
+    if (array && buf && len > 0) {
+        memcpy((jint*)array + start, buf, len * sizeof(jint));
+    }
 }
 
 static void JNICALL mock_ReleasePrimitiveArrayCritical(JNIEnv *env, jarray array, void *carray, jint mode) {
@@ -477,9 +504,14 @@ static const struct JNINativeInterface g_jni_functions = {
 
     .GetByteArrayElements = mock_GetByteArrayElements,
     .GetShortArrayElements = mock_GetShortArrayElements,
+    .GetIntArrayElements = mock_GetIntArrayElements,
 
     .ReleaseByteArrayElements = mock_ReleaseByteArrayElements,
     .ReleaseShortArrayElements = mock_ReleaseShortArrayElements,
+    .ReleaseIntArrayElements = mock_ReleaseIntArrayElements,
+
+    .GetIntArrayRegion = mock_GetIntArrayRegion,
+    .SetIntArrayRegion = mock_SetIntArrayRegion,
 
     .GetPrimitiveArrayCritical = mock_GetPrimitiveArrayCritical,
     .ReleasePrimitiveArrayCritical = mock_ReleasePrimitiveArrayCritical,

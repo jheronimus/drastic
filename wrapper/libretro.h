@@ -24,6 +24,10 @@ extern "C" {
 #define RETRO_DEVICE_ANALOG       5
 #define RETRO_DEVICE_POINTER      6
 
+#define RETRO_DEVICE_ID_POINTER_X        0
+#define RETRO_DEVICE_ID_POINTER_Y        1
+#define RETRO_DEVICE_ID_POINTER_PRESSED  2
+
 #define RETRO_DEVICE_ID_JOYPAD_B        0
 #define RETRO_DEVICE_ID_JOYPAD_Y        1
 #define RETRO_DEVICE_ID_JOYPAD_SELECT   2
