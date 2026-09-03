@@ -154,6 +154,7 @@ typedef struct {
 static audio_frame_t g_audio_ring[AUDIO_RING_FRAMES];
 static size_t g_audio_ring_read = 0;
 static size_t g_audio_ring_write = 0;
+static bool s_audio_primed = false;
 static pthread_mutex_t g_audio_ring_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static int g_ts_fd = -1;
@@ -602,6 +603,11 @@ void retro_set_controller_port_device(unsigned port, unsigned device) {
 }
 
 void retro_reset(void) {
+   pthread_mutex_lock(&g_audio_ring_mutex);
+   g_audio_ring_read = 0;
+   g_audio_ring_write = 0;
+   s_audio_primed = false;
+   pthread_mutex_unlock(&g_audio_ring_mutex);
    if (p_resetDS) {
       JNIEnv *env = get_mock_jni_env();
       p_resetDS(env, NULL);
@@ -692,6 +698,12 @@ bool retro_load_game(const struct retro_game_info *game) {
    if (!game || !game->path) return false;
    update_variables();
    g_active_screen = g_opt_initial_bottom ? true : false;
+
+   pthread_mutex_lock(&g_audio_ring_mutex);
+   g_audio_ring_read = 0;
+   g_audio_ring_write = 0;
+   s_audio_primed = false;
+   pthread_mutex_unlock(&g_audio_ring_mutex);
 
    if (g_save_ram) {
       munmap(g_save_ram, g_save_ram_size);
@@ -1145,28 +1157,46 @@ void retro_run(void) {
       if (g_fast_forward_active) {
          /* Flush audio ring during fast forward so it never backs up or blocks */
          g_audio_ring_read = g_audio_ring_write;
+         s_audio_primed = false;
       } else {
-         while (g_audio_ring_read != g_audio_ring_write && drained < 735) {
-            drain_buf[drained++] = g_audio_ring[g_audio_ring_read];
-            g_audio_ring_read = (g_audio_ring_read + 1) % AUDIO_RING_FRAMES;
+         size_t buffered = (g_audio_ring_write >= g_audio_ring_read) ?
+                           (g_audio_ring_write - g_audio_ring_read) :
+                           (AUDIO_RING_FRAMES - g_audio_ring_read + g_audio_ring_write);
+         if (!s_audio_primed) {
+            /* Pre-roll: wait until at least 1 DraStic burst (~66 ms / 2940 samples) is buffered */
+            if (buffered >= 2940) {
+               s_audio_primed = true;
+               LOGI("[DraStic-Audio] audio primed with %zu buffered frames\n", buffered);
+            }
+         }
+
+         if (s_audio_primed) {
+            while (g_audio_ring_read != g_audio_ring_write && drained < 735) {
+               drain_buf[drained++] = g_audio_ring[g_audio_ring_read];
+               g_audio_ring_read = (g_audio_ring_read + 1) % AUDIO_RING_FRAMES;
+            }
          }
       }
       pthread_mutex_unlock(&g_audio_ring_mutex);
 
-      if (drained > 0) {
-         static int s_audio_report = 0;
-         if (++s_audio_report % 60 == 0) {
-            int nz = 0;
-            int16_t pk = 0;
-            const int16_t *s16 = (const int16_t*)drain_buf;
-            for (size_t s = 0; s < drained * 2; s++) {
-               if (s16[s] != 0) nz++;
-               int16_t v = abs(s16[s]);
-               if (v > pk) pk = v;
-            }
-            LOGI("[DraStic-Audio] drained=%zu non_zero=%d peak=%d\n", drained, nz, (int)pk);
-         }
-         audio_batch_cb((const int16_t*)drain_buf, drained);
+      /* Always deliver exactly 735 frames per video frame to keep frontend audio clock locked */
+      if (drained < 735) {
+         memset(&drain_buf[drained], 0, (735 - drained) * sizeof(audio_frame_t));
       }
+
+      static int s_audio_report = 0;
+      if (++s_audio_report % 60 == 0) {
+         int nz = 0;
+         int16_t pk = 0;
+         const int16_t *s16 = (const int16_t*)drain_buf;
+         for (size_t s = 0; s < 735 * 2; s++) {
+            if (s16[s] != 0) nz++;
+            int16_t v = abs(s16[s]);
+            if (v > pk) pk = v;
+         }
+         LOGI("[DraStic-Audio] delivered=735 (real=%zu) non_zero=%d peak=%d primed=%d\n",
+              drained, nz, (int)pk, (int)s_audio_primed);
+      }
+      audio_batch_cb((const int16_t*)drain_buf, 735);
    }
 }
