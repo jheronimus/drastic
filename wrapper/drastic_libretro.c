@@ -83,12 +83,10 @@ static uint64_t build_drastic_config(void) {
    if (g_fast_forward_active) {
       value |= (uint64_t)3;         /* frameskip = 3 */
       value |= (uint64_t)1 << 5;    /* frameskip_type = 1 (Manual 3 frameskip) */
-      value |= (uint64_t)6 << 12;   /* fastforward_speed = 6 (0 us delay / Unlimited) */
       value |= (UINT64_C(1) << 29); /* FastForwardEnabled = 1 */
    } else {
       value |= (uint64_t)(g_opt_frameskip & 0x1f);
       value |= (uint64_t)(g_opt_frameskip_type & 0x7) << 5;
-      value |= (uint64_t)(g_opt_fastforward_speed & 0xf) << 12;
    }
    value |= (uint64_t)2 << 8;    /* audio_latency = 2 (Medium) */
    value |= (uint64_t)(g_opt_cpu_threads & 0x7) << 16;
@@ -106,8 +104,6 @@ static uint64_t build_drastic_config(void) {
       value |= (UINT64_C(1) << 41); /* Hires3D = 1 */
    if (g_opt_cheats)
       value |= (UINT64_C(1) << 27); /* CheatsEnabled = 1 */
-   if (g_opt_audio_filter)
-      value |= (UINT64_C(1) << 24); /* SoundVolumeInterpolation = 1 */
    if (!g_opt_edge_marking)
       value |= (UINT64_C(1) << 40); /* DisableEdgeMarking = 1 */
    if (g_opt_rtc)
