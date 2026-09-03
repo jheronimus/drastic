@@ -29,6 +29,16 @@ cd "$HOME" || exit 1
 [ -x /usr/share/minime/scripts/audio.sh ] && /usr/share/minime/scripts/audio.sh init >/dev/null 2>&1 || true
 amixer -q -c 1 sset 'Playback Mux' HP >/dev/null 2>&1 || amixer -q sset 'Playback Mux' HP >/dev/null 2>&1 || true
 amixer -q -c 1 sset 'Internal Speakers' on >/dev/null 2>&1 || amixer -q sset 'Internal Speakers' on >/dev/null 2>&1 || true
+# Lock CPU to max performance (1.8GHz) for NDS emulation
+echo performance > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true
+echo 1800000 > /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq 2>/dev/null || true
+echo 1800000 > /sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq 2>/dev/null || true
+
 export SDL_AUDIODRIVER="${SDL_AUDIODRIVER:-alsa}"
 export LD_LIBRARY_PATH="$CORES_PATH:$SYSTEM_PATH/lib:${LD_LIBRARY_PATH:-/usr/lib:/lib}"
 LD_PRELOAD="$CORES_PATH/libashmem.so" PATH="$SYSTEM_PATH/bin:$PATH" minarch.elf "$CORES_PATH/${EMU_EXE}_libretro.so" "$ROM" >"$LOGS_PATH/$EMU_TAG.txt" 2>&1
+ret=$?
+
+# Restore default governor on exit
+echo schedutil > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true
+exit $ret
