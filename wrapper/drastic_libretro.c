@@ -53,19 +53,31 @@ static fn_startGame p_startGame = NULL;
 static fn_applyConfig p_applyConfig = NULL;
 static fn_updateFrame p_updateFrame = NULL;
 
+static uint32_t g_opt_frameskip = 0;
+static uint32_t g_opt_frameskip_type = 0;
+static uint32_t g_opt_fastforward_speed = 3;
+static uint32_t g_opt_cpu_threads = 3;
+static bool g_opt_hires_3d = false;
+static bool g_opt_threaded_3d = true;
+static bool g_opt_initial_bottom = false;
+static char g_rom_basename[512] = "";
+
 static uint64_t build_drastic_config(void) {
    uint64_t value = 0;
-   value |= (uint64_t)0;         /* frameskip = 0 */
-   value |= (uint64_t)0 << 5;    /* frameskip_type = 0 (manual) */
-   value |= (uint64_t)2 << 8;    /* audio_latency = 2 */
-   value |= (uint64_t)2 << 12;   /* fast_forward = 2 */
-   value |= (uint64_t)3 << 16;   /* cpu_threads = 3 (multi-threaded JIT) */
+   value |= (uint64_t)(g_opt_frameskip & 0x1f);
+   value |= (uint64_t)(g_opt_frameskip_type & 0x7) << 5;
+   value |= (uint64_t)2 << 8;    /* audio_latency = 2 (Medium) */
+   value |= (uint64_t)(g_opt_fastforward_speed & 0xf) << 12;
+   value |= (uint64_t)(g_opt_cpu_threads & 0x7) << 16;
    value |= (uint64_t)2 << 32;   /* autofire = 2 */
    value |= (uint64_t)1 << 37;   /* mic_level = 1 */
    value |= (uint64_t)1 << 43;   /* slot2 = 1 */
 
    value |= (UINT64_C(1) << 31); /* SoundEnabled = 1 */
-   value |= (UINT64_C(1) << 28); /* Threaded3D = 1 */
+   if (g_opt_threaded_3d)
+      value |= (UINT64_C(1) << 28); /* Threaded3D = 1 */
+   if (g_opt_hires_3d)
+      value |= (UINT64_C(1) << 41); /* Hires3D = 1 */
    value |= (UINT64_C(1) << 27); /* CheatsEnabled = 1 */
    value |= (UINT64_C(1) << 26); /* MicEnabled = 1 */
    value |= (UINT64_C(1) << 25); /* BackupInSavestates = 1 */
@@ -175,7 +187,13 @@ void retro_set_environment(retro_environment_t cb) {
 
    static const struct retro_variable vars[] = {
       { "drastic_screen_layout", "Screen Layout; Single Screen|Vertical (256x384)|Side by Side (512x192)" },
-      { "drastic_touch_mode", "Touch Mode; Physical Touchscreen|Analog Cursor" },
+      { "drastic_initial_screen", "Default Screen (Single); Top Screen|Bottom Screen" },
+      { "drastic_hires_3d", "High-Resolution 3D (2x); Disabled|Enabled" },
+      { "drastic_threaded_3d", "Threaded 3D Rasterizer; Enabled|Disabled" },
+      { "drastic_frameskip", "Frameskip; None|Auto 1|Auto 2|Manual 1|Manual 2" },
+      { "drastic_fastforward_speed", "Fast Forward Speed; 3x|2x|4x|5x|Unlimited" },
+      { "drastic_cpu_threads", "CPU JIT Threads; 3|2|1" },
+      { "drastic_touch_mode", "Touch Input Mode; Physical Touchscreen|Analog Cursor" },
       { NULL, NULL }
    };
    cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void*)vars);
@@ -221,6 +239,7 @@ void retro_set_input_state(retro_input_state_t cb) { input_state_cb = cb; }
 static void update_variables(void) {
    struct retro_variable var = {0};
    enum layout_mode prev_layout = g_layout_mode;
+   uint64_t prev_config = build_drastic_config();
 
    var.key = "drastic_screen_layout";
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
@@ -230,6 +249,52 @@ static void update_variables(void) {
          g_layout_mode = LAYOUT_HORIZONTAL;
       else
          g_layout_mode = LAYOUT_VERTICAL;
+   }
+
+   var.key = "drastic_initial_screen";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+      g_opt_initial_bottom = (strcmp(var.value, "Bottom Screen") == 0);
+   }
+
+   var.key = "drastic_hires_3d";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+      g_opt_hires_3d = (strcmp(var.value, "Enabled") == 0);
+   }
+
+   var.key = "drastic_threaded_3d";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+      g_opt_threaded_3d = (strcmp(var.value, "Enabled") == 0);
+   }
+
+   var.key = "drastic_frameskip";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+      if (strcmp(var.value, "Auto 1") == 0) {
+         g_opt_frameskip = 1; g_opt_frameskip_type = 2;
+      } else if (strcmp(var.value, "Auto 2") == 0) {
+         g_opt_frameskip = 2; g_opt_frameskip_type = 2;
+      } else if (strcmp(var.value, "Manual 1") == 0) {
+         g_opt_frameskip = 1; g_opt_frameskip_type = 1;
+      } else if (strcmp(var.value, "Manual 2") == 0) {
+         g_opt_frameskip = 2; g_opt_frameskip_type = 1;
+      } else {
+         g_opt_frameskip = 0; g_opt_frameskip_type = 0;
+      }
+   }
+
+   var.key = "drastic_fastforward_speed";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+      if (strcmp(var.value, "2x") == 0) g_opt_fastforward_speed = 2;
+      else if (strcmp(var.value, "4x") == 0) g_opt_fastforward_speed = 4;
+      else if (strcmp(var.value, "5x") == 0) g_opt_fastforward_speed = 5;
+      else if (strcmp(var.value, "Unlimited") == 0) g_opt_fastforward_speed = 0;
+      else g_opt_fastforward_speed = 3;
+   }
+
+   var.key = "drastic_cpu_threads";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+      if (strcmp(var.value, "1") == 0) g_opt_cpu_threads = 1;
+      else if (strcmp(var.value, "2") == 0) g_opt_cpu_threads = 2;
+      else g_opt_cpu_threads = 3;
    }
 
    var.key = "drastic_touch_mode";
@@ -246,6 +311,14 @@ static void update_variables(void) {
       struct retro_system_av_info av;
       retro_get_system_av_info(&av);
       environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &av.geometry);
+   }
+
+   /* Apply live core config updates if any DraStic bitfield changed */
+   uint64_t cur_config = build_drastic_config();
+   if (cur_config != prev_config && p_applyConfig && g_game_loaded) {
+      JNIEnv *env = get_mock_jni_env();
+      p_applyConfig(env, NULL, (jlong)cur_config);
+      LOGI("[DraStic] Applied live core config: 0x%llx\n", (unsigned long long)cur_config);
    }
 }
 
@@ -465,6 +538,7 @@ static void save_ram_setup(const struct retro_game_info *game) {
    /* Seed from minarch's <saves_dir>/<game>.sav if present. */
    const char *base = game && game->path ? strrchr(game->path, '/') : NULL;
    base = base ? base + 1 : (game && game->path ? game->path : "game");
+   snprintf(g_rom_basename, sizeof(g_rom_basename), "%s", base);
    char sav[1024];
    snprintf(sav, sizeof(sav), "%s/%s.sav", g_save_dir, base);
    FILE *f = fopen(sav, "rb");
@@ -484,7 +558,7 @@ static char g_start_stack[1024 * 1024] __attribute__((aligned(4096)));
 bool retro_load_game(const struct retro_game_info *game) {
    if (!game || !game->path) return false;
    update_variables();
-   g_active_screen = false;
+   g_active_screen = g_opt_initial_bottom ? true : false;
 
    if (g_save_ram) {
       munmap(g_save_ram, g_save_ram_size);
@@ -548,50 +622,115 @@ size_t retro_get_memory_size(unsigned id) {
 }
 
 #define SAVE_SLOT 0
+#define RETRO_SERIALIZE_BUFFER_SIZE (4 * 1024 * 1024)
 
 size_t retro_serialize_size(void) {
-   /* DraStic savestates are slow zlib-compressed files; return 0 so the frontend
-    * does not enable real-time per-frame rewind buffer capture. */
-   return 0;
+   return RETRO_SERIALIZE_BUFFER_SIZE;
 }
 
-static void state_temp_path(char *out, size_t outsz) {
+static bool state_candidate_path(char *out, size_t outsz) {
+   /* 1. Try _savestate_temp.dss */
    snprintf(out, outsz, "%s/_savestate_temp.dss", g_savestates_dir);
+   if (access(out, F_OK) == 0) return true;
+
+   /* 2. Try <rom_basename>_0.dss */
+   if (g_rom_basename[0]) {
+      snprintf(out, outsz, "%s/%s_0.dss", g_savestates_dir, g_rom_basename);
+      if (access(out, F_OK) == 0) return true;
+
+      char noext[512];
+      snprintf(noext, sizeof(noext), "%s", g_rom_basename);
+      char *dot = strrchr(noext, '.');
+      if (dot) *dot = '\0';
+      snprintf(out, outsz, "%s/%s_0.dss", g_savestates_dir, noext);
+      if (access(out, F_OK) == 0) return true;
+   }
+   return false;
 }
 
 bool retro_serialize(void *data, size_t size) {
-    if (!g_game_loaded || !g_drastic_audio_started || !p_saveState || !data) return false;
-    JNIEnv *env = get_mock_jni_env();
-    /* Blocking save (async=1); the core writes <savestates>/_savestate_temp.dss. */
-    p_saveState(env, NULL, SAVE_SLOT, JNI_TRUE);
+   if (!g_game_loaded || !g_drastic_audio_started || !p_saveState || !data) return false;
+   if (size < sizeof(uint32_t)) return false;
 
-    char path[1100];
-    state_temp_path(path, sizeof(path));
-    FILE *f = fopen(path, "rb");
-    if (!f) return false;
-    struct stat st;
-    if (fstat(fileno(f), &st) != 0 || st.st_size <= 0 ||
-        (size_t)st.st_size > size) {
-        fclose(f);
-        return false;
-    }
-    size_t got = fread(data, 1, (size_t)st.st_size, f);
-    fclose(f);
-    return got == (size_t)st.st_size;
+   /* Remove any existing temp state before triggering synchronous save */
+   char path[1100];
+   snprintf(path, sizeof(path), "%s/_savestate_temp.dss", g_savestates_dir);
+   unlink(path);
+
+   JNIEnv *env = get_mock_jni_env();
+   p_saveState(env, NULL, SAVE_SLOT, JNI_TRUE);
+
+   if (!state_candidate_path(path, sizeof(path))) {
+      LOGW("[DraStic-State] retro_serialize: save state file not found\n");
+      return false;
+   }
+
+   FILE *f = fopen(path, "rb");
+   if (!f) return false;
+   struct stat st;
+   if (fstat(fileno(f), &st) != 0 || st.st_size <= 0 || (size_t)st.st_size > (size - sizeof(uint32_t))) {
+      fclose(f);
+      return false;
+   }
+
+   uint32_t payload_sz = (uint32_t)st.st_size;
+   memcpy(data, &payload_sz, sizeof(uint32_t));
+
+   size_t got = fread((char*)data + sizeof(uint32_t), 1, payload_sz, f);
+   fclose(f);
+
+   LOGI("[DraStic-State] retro_serialize: saved %zu bytes from %s\n", got, path);
+   return got == payload_sz;
 }
 
 bool retro_unserialize(const void *data, size_t size) {
    if (!g_game_loaded || !g_drastic_audio_started || !p_loadState || !data) return false;
-   char path[1100];
-   state_temp_path(path, sizeof(path));
-   FILE *f = fopen(path, "wb");
-   if (!f) return false;
-   size_t wrote = fwrite(data, 1, size, f);
-   fclose(f);
-   if (wrote != size) return false;
+   if (size < sizeof(uint32_t)) return false;
+
+   uint32_t payload_sz = 0;
+   memcpy(&payload_sz, data, sizeof(uint32_t));
+
+   const void *payload_data = (const char*)data + sizeof(uint32_t);
+   size_t write_sz = payload_sz;
+
+   /* If data does not have 4-byte header (e.g. raw DSS dump), use full buffer */
+   if (payload_sz == 0 || payload_sz > size - sizeof(uint32_t)) {
+      payload_data = data;
+      write_sz = size;
+   }
+
+   /* Write to both candidates so loadState finds it whether looking for _temp or slot 0 */
+   char path1[1100], path2[1100];
+   snprintf(path1, sizeof(path1), "%s/_savestate_temp.dss", g_savestates_dir);
+   FILE *f1 = fopen(path1, "wb");
+   if (f1) {
+      fwrite(payload_data, 1, write_sz, f1);
+      fclose(f1);
+   }
+
+   if (g_rom_basename[0]) {
+      snprintf(path2, sizeof(path2), "%s/%s_0.dss", g_savestates_dir, g_rom_basename);
+      FILE *f2 = fopen(path2, "wb");
+      if (f2) {
+         fwrite(payload_data, 1, write_sz, f2);
+         fclose(f2);
+      }
+      char noext[512];
+      snprintf(noext, sizeof(noext), "%s", g_rom_basename);
+      char *dot = strrchr(noext, '.');
+      if (dot) *dot = '\0';
+      snprintf(path2, sizeof(path2), "%s/%s_0.dss", g_savestates_dir, noext);
+      FILE *f3 = fopen(path2, "wb");
+      if (f3) {
+         fwrite(payload_data, 1, write_sz, f3);
+         fclose(f3);
+      }
+   }
 
    JNIEnv *env = get_mock_jni_env();
-   return p_loadState(env, NULL, SAVE_SLOT);
+   bool ok = p_loadState(env, NULL, SAVE_SLOT);
+   LOGI("[DraStic-State] retro_unserialize: wrote %zu bytes, loadState -> %s\n", write_sz, ok ? "ok" : "failed");
+   return ok;
 }
 
 void retro_cheat_reset(void) {}

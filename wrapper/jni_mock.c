@@ -368,6 +368,18 @@ static jobject JNICALL mock_CallStaticObjectMethod(JNIEnv *env, jclass clazz, jm
     return res;
 }
 
+static void resolve_mock_path(const char *in, char *out, size_t outsz) {
+    if (!in || !in[0]) {
+        out[0] = '\0';
+        return;
+    }
+    if (in[0] == '/' || in[0] == '.') {
+        snprintf(out, outsz, "%s", in);
+    } else {
+        snprintf(out, outsz, "%s/%s", g_system_dir, in);
+    }
+}
+
 static jboolean JNICALL mock_CallStaticBooleanMethodV(JNIEnv *env, jclass clazz, jmethodID methodID, va_list args) {
     (void)clazz;
     if (methodID == g_method_rename) {
@@ -375,14 +387,23 @@ static jboolean JNICALL mock_CallStaticBooleanMethodV(JNIEnv *env, jclass clazz,
         jstring jnew = va_arg(args, jstring);
         const char *oldp = mock_GetStringUTFChars(env, jold, NULL);
         const char *newp = mock_GetStringUTFChars(env, jnew, NULL);
-        rename(oldp, newp);
-        return JNI_TRUE;
+        char fold[1024], fnew[1024];
+        resolve_mock_path(oldp, fold, sizeof(fold));
+        resolve_mock_path(newp, fnew, sizeof(fnew));
+        int r = rename(fold, fnew);
+        fprintf(stderr, "[JNI-Mock] rename('%s' -> '%s') -> %d\n", fold, fnew, r);
+        fflush(stderr);
+        return r == 0 ? JNI_TRUE : JNI_FALSE;
     }
     if (methodID == g_method_remove) {
         jstring jpath = va_arg(args, jstring);
         const char *path = mock_GetStringUTFChars(env, jpath, NULL);
-        unlink(path);
-        return JNI_TRUE;
+        char fpath[1024];
+        resolve_mock_path(path, fpath, sizeof(fpath));
+        int r = unlink(fpath);
+        fprintf(stderr, "[JNI-Mock] remove('%s') -> %d\n", fpath, r);
+        fflush(stderr);
+        return r == 0 ? JNI_TRUE : JNI_FALSE;
     }
     return JNI_FALSE;
 }
