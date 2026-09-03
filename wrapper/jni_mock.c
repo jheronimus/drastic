@@ -285,7 +285,10 @@ static jobject JNICALL mock_CallStaticObjectMethodV(JNIEnv *env, jclass clazz, j
         const char *mode = mock_GetStringUTFChars(env, jmode, NULL);
 
         char fullpath[1024];
-        if (path && (path[0] == '/' || path[0] == '.')) {
+        if (path && strncmp(path, "User/savestates", 15) == 0) {
+            ensure_dir("/tmp/drastic_savestates");
+            snprintf(fullpath, sizeof(fullpath), "/tmp/drastic_savestates/%s", path + 15);
+        } else if (path && (path[0] == '/' || path[0] == '.')) {
             snprintf(fullpath, sizeof(fullpath), "%s", path);
         } else {
             snprintf(fullpath, sizeof(fullpath), "%s/%s", g_system_dir, path ? path : "");
@@ -371,6 +374,10 @@ static jobject JNICALL mock_CallStaticObjectMethod(JNIEnv *env, jclass clazz, jm
 static void resolve_mock_path(const char *in, char *out, size_t outsz) {
     if (!in || !in[0]) {
         out[0] = '\0';
+        return;
+    }
+    if (strncmp(in, "User/savestates", 15) == 0) {
+        snprintf(out, outsz, "/tmp/drastic_savestates/%s", in + 15);
         return;
     }
     if (in[0] == '/' || in[0] == '.') {

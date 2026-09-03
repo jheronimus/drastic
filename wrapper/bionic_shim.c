@@ -198,12 +198,16 @@ static void *bq_worker(void *arg) {
         if (audio) {
             audio(buf, size / 4);
         }
-        /* The emulation thread is paced by the buffer-consumption callback. */
-        double sec = (double)size / (4.0 * 44100.0);
-        struct timespec ts;
-        ts.tv_sec = (time_t)sec;
-        ts.tv_nsec = (long)((sec - (double)ts.tv_sec) * 1e9);
-        nanosleep(&ts, NULL);
+        /* The emulation thread is paced by the buffer-consumption callback.
+         * Skip sleep during fast forward so the SPU advances at full speed. */
+        extern volatile int g_fast_forward_active;
+        if (!g_fast_forward_active) {
+            double sec = (double)size / (4.0 * 44100.0);
+            struct timespec ts;
+            ts.tv_sec = (time_t)sec;
+            ts.tv_nsec = (long)((sec - (double)ts.tv_sec) * 1e9);
+            nanosleep(&ts, NULL);
+        }
 
         if (cb) {
             ((void (*)(SLBufferQueueItf, void *))cb)(&g_bufqueue_itf_ref, ctx);

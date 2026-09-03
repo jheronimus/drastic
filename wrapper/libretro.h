@@ -79,6 +79,21 @@ extern "C" {
 #define RETRO_ENVIRONMENT_SET_GEOMETRY 37
 #define RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY 31
 #define RETRO_ENVIRONMENT_SET_CORE_OPTIONS 52
+#define RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE 23
+
+enum retro_rumble_effect
+{
+   RETRO_RUMBLE_STRONG = 0,
+   RETRO_RUMBLE_WEAK = 1,
+   RETRO_RUMBLE_DUMMY = INT_MAX
+};
+
+typedef bool (*retro_set_rumble_state_t)(unsigned port, enum retro_rumble_effect effect, uint16_t strength);
+
+struct retro_rumble_interface
+{
+   retro_set_rumble_state_t set_rumble_state;
+};
 
 enum retro_log_level
 {

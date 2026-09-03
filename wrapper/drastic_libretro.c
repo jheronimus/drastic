@@ -60,7 +60,23 @@ static uint32_t g_opt_cpu_threads = 3;
 static bool g_opt_hires_3d = false;
 static bool g_opt_threaded_3d = true;
 static bool g_opt_initial_bottom = false;
+static uint32_t g_opt_slot2 = 2;          /* 2 = Rumble Pak (default) */
+static bool g_opt_direct_boot = true;      /* Direct Game Boot (default) */
+static bool g_opt_preload_rom = true;      /* Preload ROM to RAM (default) */
+static bool g_opt_rtc = true;              /* Sync System Clock (default) */
+static bool g_opt_edge_marking = true;     /* 3D Edge Marking (default) */
+static bool g_opt_cheats = true;           /* Action Replay Cheats (default) */
+static bool g_opt_mic = false;             /* Microphone Emulation (default Disabled) */
+static bool g_opt_audio_filter = true;     /* Audio Interpolation (default High Quality) */
+static int g_opt_cursor_speed = 4000;      /* Normal cursor sensitivity (default) */
+static uint32_t g_opt_autofire = 0;        /* Autofire Off (default) */
 static char g_rom_basename[512] = "";
+
+volatile int g_fast_forward_active = 0;
+static struct retro_rumble_interface g_rumble = {0};
+
+typedef jint (*fn_getRumbleState)(JNIEnv *env, jobject obj);
+static fn_getRumbleState p_getRumbleState = NULL;
 
 static uint64_t build_drastic_config(void) {
    uint64_t value = 0;
@@ -69,22 +85,36 @@ static uint64_t build_drastic_config(void) {
    value |= (uint64_t)2 << 8;    /* audio_latency = 2 (Medium) */
    value |= (uint64_t)(g_opt_fastforward_speed & 0xf) << 12;
    value |= (uint64_t)(g_opt_cpu_threads & 0x7) << 16;
-   value |= (uint64_t)2 << 32;   /* autofire = 2 */
-   value |= (uint64_t)1 << 37;   /* mic_level = 1 */
-   value |= (uint64_t)1 << 43;   /* slot2 = 1 */
+   value |= (uint64_t)(g_opt_autofire & 0x7) << 32;
+   if (g_opt_mic) {
+      value |= (uint64_t)1 << 37; /* mic_level = 1 (white noise sample) */
+      value |= (UINT64_C(1) << 26); /* MicEnabled = 1 */
+   }
+   value |= (uint64_t)(g_opt_slot2 & 0xf) << 43; /* slot2 device */
 
    value |= (UINT64_C(1) << 31); /* SoundEnabled = 1 */
    if (g_opt_threaded_3d)
       value |= (UINT64_C(1) << 28); /* Threaded3D = 1 */
    if (g_opt_hires_3d)
       value |= (UINT64_C(1) << 41); /* Hires3D = 1 */
-   value |= (UINT64_C(1) << 27); /* CheatsEnabled = 1 */
-   value |= (UINT64_C(1) << 26); /* MicEnabled = 1 */
+   if (g_opt_cheats)
+      value |= (UINT64_C(1) << 27); /* CheatsEnabled = 1 */
+   if (g_opt_audio_filter)
+      value |= (UINT64_C(1) << 24); /* SoundVolumeInterpolation = 1 */
+   if (g_fast_forward_active)
+      value |= (UINT64_C(1) << 29); /* FastForwardEnabled = 1 */
+   if (!g_opt_edge_marking)
+      value |= (UINT64_C(1) << 40); /* DisableEdgeMarking = 1 */
+   if (g_opt_rtc)
+      value |= (UINT64_C(1) << 39); /* RtcSystemTime = 1 */
+   if (g_opt_direct_boot)
+      value |= (UINT64_C(1) << 50); /* DirectBoot = 1 */
+   if (g_opt_preload_rom)
+      value |= (UINT64_C(1) << 48); /* PreloadRoms = 1 */
+
    value |= (UINT64_C(1) << 25); /* BackupInSavestates = 1 */
    value |= (UINT64_C(1) << 23); /* Use16BitColor = 1 */
-   value |= (UINT64_C(1) << 39); /* RtcSystemTime = 1 */
    value |= (UINT64_C(1) << 42); /* LuaEnabled = 1 */
-   value |= (UINT64_C(1) << 48); /* PreloadRoms = 1 */
    return value;
 }
 static fn_getScreenBuffers p_getScreenBuffers = NULL;
@@ -193,7 +223,17 @@ void retro_set_environment(retro_environment_t cb) {
       { "drastic_frameskip", "Frameskip; None|Auto 1|Auto 2|Manual 1|Manual 2" },
       { "drastic_fastforward_speed", "Fast Forward Speed; 3x|2x|4x|5x|Unlimited" },
       { "drastic_cpu_threads", "CPU JIT Threads; 3|2|1" },
+      { "drastic_slot2_device", "Slot 2 Device; Rumble Pak|GBA Cartridge|RAM Expansion (8MB)|None" },
+      { "drastic_direct_boot", "Boot Mode; Direct Game Boot|NDS Firmware GUI" },
+      { "drastic_preload_rom", "Preload ROM to RAM; Enabled|Disabled" },
+      { "drastic_rtc", "Real-Time Clock; Sync System Clock|Fixed Time" },
+      { "drastic_edge_marking", "3D Edge Marking; Enabled|Disabled" },
+      { "drastic_cheats", "Action Replay Cheats; Enabled|Disabled" },
+      { "drastic_mic_mode", "Microphone Emulation; Disabled|Sample White Noise" },
+      { "drastic_audio_filter", "Sound Quality; Interpolated (High Quality)|Raw (Fast)" },
       { "drastic_touch_mode", "Touch Input Mode; Physical Touchscreen|Analog Cursor" },
+      { "drastic_cursor_speed", "Stylus Cursor Speed; Normal|Fast|Slow" },
+      { "drastic_autofire", "Autofire Rate; Off|Fast (10 Hz)|Slow (5 Hz)" },
       { NULL, NULL }
    };
    cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void*)vars);
@@ -212,6 +252,8 @@ void retro_set_environment(retro_environment_t cb) {
    if (cb(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &log)) {
       g_log = log.log;
    }
+
+   cb(RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE, &g_rumble);
 }
 
 void retro_set_video_refresh(retro_video_refresh_t cb) { video_cb = cb; }
@@ -297,12 +339,69 @@ static void update_variables(void) {
       else g_opt_cpu_threads = 3;
    }
 
+   var.key = "drastic_slot2_device";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+      if (strcmp(var.value, "GBA Cartridge") == 0) g_opt_slot2 = 1;
+      else if (strcmp(var.value, "RAM Expansion (8MB)") == 0) g_opt_slot2 = 3;
+      else if (strcmp(var.value, "None") == 0) g_opt_slot2 = 0;
+      else g_opt_slot2 = 2; /* Rumble Pak */
+   }
+
+   var.key = "drastic_direct_boot";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+      g_opt_direct_boot = (strcmp(var.value, "NDS Firmware GUI") != 0);
+   }
+
+   var.key = "drastic_preload_rom";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+      g_opt_preload_rom = (strcmp(var.value, "Disabled") != 0);
+   }
+
+   var.key = "drastic_rtc";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+      g_opt_rtc = (strcmp(var.value, "Fixed Time") != 0);
+   }
+
+   var.key = "drastic_edge_marking";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+      g_opt_edge_marking = (strcmp(var.value, "Disabled") != 0);
+   }
+
+   var.key = "drastic_cheats";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+      g_opt_cheats = (strcmp(var.value, "Disabled") != 0);
+   }
+
+   var.key = "drastic_mic_mode";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+      g_opt_mic = (strcmp(var.value, "Sample White Noise") == 0);
+   }
+
+   var.key = "drastic_audio_filter";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+      g_opt_audio_filter = (strcmp(var.value, "Raw (Fast)") != 0);
+   }
+
    var.key = "drastic_touch_mode";
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
       if (strcmp(var.value, "Analog Cursor") == 0)
          g_touch_mode = TOUCH_MODE_ANALOG;
       else
          g_touch_mode = TOUCH_MODE_TOUCHSCREEN;
+   }
+
+   var.key = "drastic_cursor_speed";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+      if (strcmp(var.value, "Fast") == 0) g_opt_cursor_speed = 2000;
+      else if (strcmp(var.value, "Slow") == 0) g_opt_cursor_speed = 8000;
+      else g_opt_cursor_speed = 4000;
+   }
+
+   var.key = "drastic_autofire";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+      if (strcmp(var.value, "Fast (10 Hz)") == 0) g_opt_autofire = 2;
+      else if (strcmp(var.value, "Slow (5 Hz)") == 0) g_opt_autofire = 1;
+      else g_opt_autofire = 0;
    }
 
    /* Layout changes reshape the output; tell the frontend so scalers and
@@ -382,6 +481,7 @@ void retro_init(void) {
    p_quitSystem = (fn_quitSystem)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_quitSystem");
    p_signalScreen = (fn_signalScreen)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_signalScreen");
    p_waitScreen = (fn_waitScreen)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_waitScreen");
+   p_getRumbleState = (fn_getRumbleState)dlsym(g_drastic_handle, "Java_com_dsemu_drastic_DraSticJNI_getRumbleState");
 
    if (p_JNI_OnLoad) {
       p_JNI_OnLoad(get_mock_java_vm(), NULL);
@@ -507,7 +607,7 @@ static void save_ram_setup(const struct retro_game_info *game) {
    mkdir(dir, 0777);
 
    snprintf(g_battery_path, sizeof(g_battery_path), "%s/User/backup/dseins.dsv", g_system_dir);
-   snprintf(g_savestates_dir, sizeof(g_savestates_dir), "%s/User/savestates", g_system_dir);
+   snprintf(g_savestates_dir, sizeof(g_savestates_dir), "/tmp/drastic_savestates");
    mkdir(g_savestates_dir, 0777);
 
    int fd = open(g_battery_path, O_RDWR | O_CREAT, 0666);
@@ -868,8 +968,8 @@ void retro_run(void) {
       if (g_touch_mode == TOUCH_MODE_ANALOG) {
          int16_t rx = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X);
          int16_t ry = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y);
-         if (abs(rx) > 4000) g_cursor_x += rx / 4000;
-         if (abs(ry) > 4000) g_cursor_y += ry / 4000;
+         if (abs(rx) > 4000) g_cursor_x += rx / g_opt_cursor_speed;
+         if (abs(ry) > 4000) g_cursor_y += ry / g_opt_cursor_speed;
       }
 
       if (g_cursor_x < 0) g_cursor_x = 0;
@@ -884,7 +984,44 @@ void retro_run(void) {
       }
    }
 
+   /* Fast Forward detection: check frontend shortcuts (SELECT + R1)
+    * or rapid frame pacing (elapsed frame delta < 8ms). */
+   bool r1_pressed = input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R);
+   bool sel_pressed = input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT);
+
+   struct timespec now_ts;
+   clock_gettime(CLOCK_MONOTONIC, &now_ts);
+   static struct timespec s_last_frame_ts = {0};
+   long frame_delta_us = 0;
+   if (s_last_frame_ts.tv_sec > 0) {
+      frame_delta_us = (now_ts.tv_sec - s_last_frame_ts.tv_sec) * 1000000 + (now_ts.tv_nsec - s_last_frame_ts.tv_nsec) / 1000;
+   }
+   s_last_frame_ts = now_ts;
+
+   int is_ff = 0;
+   if ((r1_pressed && sel_pressed) || (frame_delta_us > 0 && frame_delta_us < 8000)) {
+      is_ff = 1;
+   }
+
    JNIEnv *env = get_mock_jni_env();
+   if (is_ff != g_fast_forward_active) {
+      g_fast_forward_active = is_ff;
+      if (p_applyConfig && g_game_loaded) {
+         p_applyConfig(env, NULL, (jlong)build_drastic_config());
+      }
+   }
+
+   /* Hardware Rumble Feedback */
+   if (p_getRumbleState && g_rumble.set_rumble_state) {
+      bool rumble_on = p_getRumbleState(env, NULL) != 0;
+      static bool s_last_rumble = false;
+      if (rumble_on != s_last_rumble) {
+         s_last_rumble = rumble_on;
+         g_rumble.set_rumble_state(0, RETRO_RUMBLE_STRONG, rumble_on ? 0xffff : 0);
+         g_rumble.set_rumble_state(0, RETRO_RUMBLE_WEAK, rumble_on ? 0x8000 : 0);
+      }
+   }
+
    int touchXY = ((touch_x & 0xffff) << 16) | (touch_y & 0xffff);
 
    /* Inject input + read frame readiness in one call. */
