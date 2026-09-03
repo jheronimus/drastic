@@ -318,3 +318,39 @@ int munmap(void *addr, size_t length) {
     }
     return r;
 }
+
+/* Fast in-memory state bypass: intercept zlib calls made by DraStic.
+ * Bypasses zlib compression so save states and MinUI rewind operate in <1ms. */
+unsigned long compressBound(unsigned long sourceLen) {
+    return sourceLen + 128;
+}
+
+int compress(unsigned char *dest, unsigned long *destLen, const unsigned char *src, unsigned long srcLen) {
+    if (!dest || !destLen || !src) return -2; /* Z_STREAM_ERROR */
+    if (*destLen < srcLen) return -5;         /* Z_BUF_ERROR */
+    memcpy(dest, src, srcLen);
+    *destLen = srcLen;
+    return 0; /* Z_OK */
+}
+
+int uncompress(unsigned char *dest, unsigned long *destLen, const unsigned char *src, unsigned long srcLen) {
+    if (!dest || !destLen || !src) return -2; /* Z_STREAM_ERROR */
+    /* Check if src is actually a legacy zlib-compressed stream (magic 0x78) */
+    if (srcLen >= 2 && src[0] == 0x78 && (src[1] == 0x01 || src[1] == 0x5e || src[1] == 0x9c || src[1] == 0xda)) {
+        static int (*real_uncompress)(unsigned char *, unsigned long *, const unsigned char *, unsigned long) = NULL;
+        if (!real_uncompress) {
+            void *h = dlopen("libz.so.1", RTLD_LAZY);
+            if (!h) h = dlopen("libz.so", RTLD_LAZY);
+            if (h) real_uncompress = dlsym(h, "uncompress");
+        }
+        if (real_uncompress) {
+            int ret = real_uncompress(dest, destLen, src, srcLen);
+            if (ret == 0) return 0;
+        }
+    }
+    /* Raw uncompressed state pass-through */
+    if (*destLen < srcLen) return -5;
+    memcpy(dest, src, srcLen);
+    *destLen = srcLen;
+    return 0; /* Z_OK */
+}

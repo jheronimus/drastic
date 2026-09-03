@@ -300,11 +300,8 @@ static void init_minarch_ff_pointer(void) {
 
       /* fast_forward is at struct_base + 4 */
       g_p_minarch_ff = (volatile int*)(page + imm12 + 4);
-      /* rewind_enable is at struct_base + 0x138: disable rewind snapshots */
-      volatile int *p_minarch_rewind = (volatile int*)(page + imm12 + 0x138);
-      *p_minarch_rewind = 0;
-      LOGI("[DraStic] Hooked minarch fast_forward at %p (val=%d), disabled rewind at %p\n",
-           (void*)g_p_minarch_ff, *g_p_minarch_ff, (void*)p_minarch_rewind);
+      LOGI("[DraStic] Hooked minarch fast_forward at %p (val=%d)\n",
+           (void*)g_p_minarch_ff, *g_p_minarch_ff);
    } else {
       LOGW("[DraStic] Could not resolve minarch fast_forward from audio_batch_cb\n");
    }
@@ -762,7 +759,7 @@ size_t retro_get_memory_size(unsigned id) {
 }
 
 #define SAVE_SLOT 0
-#define RETRO_SERIALIZE_BUFFER_SIZE (4 * 1024 * 1024)
+#define RETRO_SERIALIZE_BUFFER_SIZE (8 * 1024 * 1024)
 
 size_t retro_serialize_size(void) {
    return RETRO_SERIALIZE_BUFFER_SIZE;
@@ -791,11 +788,6 @@ static bool state_candidate_path(char *out, size_t outsz) {
 bool retro_serialize(void *data, size_t size) {
    if (!g_game_loaded || !g_drastic_audio_started || !p_saveState || !data) return false;
    if (size < sizeof(uint32_t)) return false;
-
-   /* If fast forward is active, skip serialization to avoid interrupting speed */
-   if (g_fast_forward_active) {
-      return false;
-   }
 
    /* Remove any existing temp state before triggering synchronous save */
    char path[1100];
