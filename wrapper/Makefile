@@ -37,9 +37,19 @@ $(TARGET_SO): $(OBJS) $(SHIMS)
 pak: $(TARGET_SO) $(SHIMS)
 	mkdir -p $(PAK_DIR)
 	cp $(TARGET_SO) $(SHIMS) launch.sh default.cfg $(PAK_DIR)/
-	@if [ -f "../libs/core/android/arm64/libdrastic_arm64.so" ]; then \
+	@if [ -f "../libs/build/libdrastic_arm64.so" ]; then \
+		echo "Using reconstructed libdrastic_arm64.so from build..."; \
+		cp ../libs/build/libdrastic_arm64.so $(PAK_DIR)/; \
+		cp ../libs/ref/core/android/arm64/libdrastic_cpu.so $(PAK_DIR)/; \
+	elif [ -f "../libs/ref/core/android/arm64/libdrastic_arm64.so" ]; then \
+		echo "Using reference libdrastic_arm64.so from ref/core..."; \
+		cp ../libs/ref/core/android/arm64/libdrastic_arm64.so $(PAK_DIR)/; \
+		cp ../libs/ref/core/android/arm64/libdrastic_cpu.so $(PAK_DIR)/; \
+	elif [ -f "../libs/core/android/arm64/libdrastic_arm64.so" ]; then \
 		cp ../libs/core/android/arm64/libdrastic_arm64.so $(PAK_DIR)/; \
 		cp ../libs/core/android/arm64/libdrastic_cpu.so $(PAK_DIR)/; \
+	fi
+	@if [ -f "$(PAK_DIR)/libdrastic_arm64.so" ]; then \
 		$(PATCHELF) \
 			--set-rpath '$$ORIGIN' \
 			--replace-needed libc.so ld-musl-aarch64.so.1 \
@@ -57,7 +67,9 @@ pak: $(TARGET_SO) $(SHIMS)
 			--replace-needed libstdc++.so libstdc++.so.6 \
 			$(PAK_DIR)/libdrastic_cpu.so; \
 	fi
-	@if [ -d "../libs/core/android/assets" ]; then \
+	@if [ -d "../libs/ref/core/android/assets" ]; then \
+		cp -r ../libs/ref/core/android/assets/* $(PAK_DIR)/ 2>/dev/null || true; \
+	elif [ -d "../libs/core/android/assets" ]; then \
 		cp -r ../libs/core/android/assets/* $(PAK_DIR)/ 2>/dev/null || true; \
 	fi
 	for so in $(TARGET_SO) $(SHIMS); do \
