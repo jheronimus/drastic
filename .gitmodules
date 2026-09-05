@@ -1,4 +1,4 @@
 [submodule "libs"]
 	path = libs
-	url = git@forgejo:jheronimus/drastic-libs.git
+	url = git@forgejo:drastic-libs.git
 	update = none
